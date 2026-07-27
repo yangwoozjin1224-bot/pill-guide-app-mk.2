@@ -97,7 +97,7 @@ async function searchPillList(itemName) {
 
 async function fetchPillIdentification({ shape, color, mark, itemName, itemSeq } = {}) {
   const query = {
-    type: "json", numOfRows: "10", pageNo: "1",
+    type: "json", numOfRows: "20", pageNo: "1",
     ...(itemSeq ? { item_seq: itemSeq } : {}),
     ...(itemName ? { item_name: itemName } : {}),
     ...(mark ? { print_front: mark } : {}),
@@ -107,12 +107,25 @@ async function fetchPillIdentification({ shape, color, mark, itemName, itemSeq }
   const json = await dataGoFetchJson("PILL_IDENTIFICATION", query);
   const items = normalizeItems(json?.body?.items);
   if (!items.length) throw new Error("일치하는 알약 정보를 찾을 수 없습니다");
+
   let item = items[0];
   if (mark) {
     const upper = String(mark).toUpperCase();
-    const matched = items.find((it) => String(it.PRINT_FRONT || "").toUpperCase().includes(upper));
-    if (matched) item = matched;
+    const scored = items
+      .map((it) => {
+        const front = String(it.PRINT_FRONT || "").toUpperCase();
+        const back = String(it.PRINT_BACK || "").toUpperCase();
+        let score = 0;
+        if (front === upper || back === upper) score += 100;
+        else if (front.includes(upper) || upper.includes(front) || back.includes(upper)) score += 50;
+        if (color && String(it.COLOR_CLASS1 || "").includes(color)) score += 20;
+        if (shape && String(it.DRUG_SHAPE || "").includes(shape)) score += 10;
+        return { it, score };
+      })
+      .sort((a, b) => b.score - a.score);
+    if (scored[0]?.score > 0) item = scored[0].it;
   }
+
   return {
     itemSeq: item.ITEM_SEQ || item.itemSeq,
     itemName: item.ITEM_NAME || item.itemName,
@@ -560,17 +573,17 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     };
   }, []);
 
-  // 여러 알약이 들어오도록 중앙 넓은 영역을 캡처
+  // 중앙 넓은 영역을 고해상도로 캡처
   const captureFrame = () => {
     const video = videoRef.current;
     if (!video || !video.videoWidth || !video.videoHeight) return null;
 
     const vw = video.videoWidth;
     const vh = video.videoHeight;
-    const crop = Math.min(vw, vh) * 0.72;
+    const crop = Math.min(vw, vh) * 0.78;
     const sx = (vw - crop) / 2;
     const sy = (vh - crop) / 2;
-    const out = 320;
+    const out = 480;
 
     if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
     const canvas = canvasRef.current;
@@ -579,42 +592,166 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return null;
 
-    ctx.filter = "grayscale(1) contrast(1.8) brightness(1.05)";
     ctx.drawImage(video, sx, sy, crop, crop, 0, 0, out, out);
-    ctx.filter = "none";
     return canvas;
   };
 
-  // OCR에서 여러 표기를 한꺼번에 추출
-  const extractMarksWithOcr = async (canvas) => {
-    const worker = workerRef.current;
-    if (!worker) return [];
+  // 여러 전처리 버전을 만들어 OCR 성공률을 올림
+  const buildPreprocessedCanvases = (source) => {
+    const w = source.width;
+    const h = source.height;
+    const srcCtx = source.getContext("2d", { willReadFrequently: true });
+    if (!srcCtx) return [source];
+    const src = srcCtx.getImageData(0, 0, w, h);
+    const data = src.data;
 
-    const result = await worker.recognize(canvas);
-    const text = (result?.data?.text || "").toUpperCase();
-    const candidates = text.match(/[A-Z0-9]{3,12}/g) || [];
-    if (!candidates.length) return [];
+    const makeFromPixels = (fn) => {
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext("2d");
+      const out = ctx.createImageData(w, h);
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        const v = fn(r, g, b);
+        out.data[i] = v;
+        out.data[i + 1] = v;
+        out.data[i + 2] = v;
+        out.data[i + 3] = 255;
+      }
+      ctx.putImageData(out, 0, 0);
+      return c;
+    };
 
-    // 중복 제거 + 짧은/노이즈성 표기 정리
-    const unique = [];
-    for (const raw of candidates) {
-      const mark = raw.trim();
-      if (mark.length < 3) continue;
-      if (unique.includes(mark)) continue;
-      unique.push(mark);
-      if (unique.length >= 5) break; // 한 번에 최대 5개
-    }
-    return unique;
+    // 1) 고대비 그레이
+    const contrast = makeFromPixels((r, g, b) => {
+      let y = 0.299 * r + 0.587 * g + 0.114 * b;
+      y = (y - 128) * 1.8 + 128;
+      return Math.max(0, Math.min(255, y));
+    });
+
+    // 2) 이진화 (밝은 알약 + 어두운 음각)
+    const binary = makeFromPixels((r, g, b) => {
+      const y = 0.299 * r + 0.587 * g + 0.114 * b;
+      return y > 145 ? 255 : 0;
+    });
+
+    // 3) 반전 이진화 (어두운 배경/밝은 글자)
+    const inverted = makeFromPixels((r, g, b) => {
+      const y = 0.299 * r + 0.587 * g + 0.114 * b;
+      return y > 145 ? 0 : 255;
+    });
+
+    return [contrast, binary, inverted];
   };
 
-  const lookupMarks = async (marks) => {
+  // 알약 대략 색상 → 공공 API color_class1 값
+  const estimatePillColor = (canvas) => {
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return "";
+    const { width: w, height: h } = canvas;
+    const img = ctx.getImageData(Math.floor(w * 0.3), Math.floor(h * 0.3), Math.floor(w * 0.4), Math.floor(h * 0.4));
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let n = 0;
+    for (let i = 0; i < img.data.length; i += 16) {
+      // 너무 어두운/배경색 제외
+      const rr = img.data[i];
+      const gg = img.data[i + 1];
+      const bb = img.data[i + 2];
+      if (rr + gg + bb < 80) continue;
+      r += rr;
+      g += gg;
+      b += bb;
+      n += 1;
+    }
+    if (!n) return "";
+    r /= n;
+    g /= n;
+    b /= n;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const sat = max === 0 ? 0 : (max - min) / max;
+
+    if (sat < 0.18) {
+      if (max > 200) return "하양";
+      if (max < 90) return "검정";
+      return "회색";
+    }
+    if (r > 180 && g < 120 && b < 120) return "빨강";
+    if (r > 180 && g > 100 && b < 100) return "주황";
+    if (r > 180 && g > 150 && b < 120) return "노랑";
+    if (r > 170 && g > 100 && b > 130) return "분홍";
+    if (g > r && g > b) return g > 150 ? "연두" : "초록";
+    if (b > r && b > g) return "파랑";
+    if (r > 120 && b > 120 && g < 120) return "보라";
+    if (r > 120 && g > 80 && b < 80) return "갈색";
+    return "";
+  };
+
+  // 여러 전처리 + 신뢰도 기반 표기 추출
+  const extractMarksWithOcr = async (canvas) => {
+    const worker = workerRef.current;
+    if (!worker) return { marks: [], color: "" };
+
+    const color = estimatePillColor(canvas);
+    const variants = buildPreprocessedCanvases(canvas);
+    const scoreMap = new Map();
+
+    for (const variant of variants) {
+      try {
+        const result = await worker.recognize(variant);
+        const words = result?.data?.words || [];
+        if (words.length) {
+          for (const w of words) {
+            const raw = String(w.text || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+            if (raw.length < 3 || raw.length > 12) continue;
+            const conf = Number(w.confidence || 0);
+            if (conf < 45) continue;
+            const prev = scoreMap.get(raw) || 0;
+            scoreMap.set(raw, prev + conf + raw.length);
+          }
+        } else {
+          const text = (result?.data?.text || "").toUpperCase();
+          const candidates = text.match(/[A-Z0-9]{3,12}/g) || [];
+          for (const raw of candidates) {
+            const prev = scoreMap.get(raw) || 0;
+            scoreMap.set(raw, prev + 40 + raw.length);
+          }
+        }
+      } catch {
+        // 한 전처리 실패해도 계속
+      }
+    }
+
+    const marks = Array.from(scoreMap.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([mark]) => mark)
+      .slice(0, 5);
+
+    return { marks, color };
+  };
+
+  const lookupMarks = async (marks, color = "") => {
     processingRef.current = true;
     setStatus("loading");
     setDetectedMarks(marks);
 
     try {
       const settled = await Promise.allSettled(
-        marks.map((mark) => fetchPillData({ mark, itemName: mark }, schedule))
+        marks.map((mark) =>
+          fetchPillData(
+            {
+              mark,
+              itemName: mark,
+              ...(color ? { color } : {}),
+            },
+            schedule
+          )
+        )
       );
       if (cancelledRef.current) return;
 
@@ -636,7 +773,6 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         return;
       }
 
-      // 1개면 바로 상세, 여러 개면 목록
       if (pills.length === 1) {
         setStatus("found");
         setDetailSource("scan");
@@ -689,7 +825,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     setResumeKey((k) => k + 1);
   };
 
-  // 실시간 OCR 루프 (여러 표기 동시 인식)
+  // 실시간 OCR 루프 (여러 표기 + 2프레임 확정으로 오인식 감소)
   useEffect(() => {
     if (cameraError) return;
 
@@ -699,6 +835,9 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
     let timerId = null;
     let stopped = false;
+    let lastKey = "";
+    let confirmCount = 0;
+    let lastColor = "";
 
     const tick = async () => {
       if (stopped || cancelledRef.current || processingRef.current) return;
@@ -716,18 +855,36 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
       setStatus("ocr");
       try {
-        const marks = await extractMarksWithOcr(frame);
+        const { marks, color } = await extractMarksWithOcr(frame);
         if (stopped || cancelledRef.current || processingRef.current) return;
 
         if (!marks.length) {
+          lastKey = "";
+          confirmCount = 0;
           setDetectedMarks([]);
           setStatus("scanning");
-          timerId = setTimeout(tick, 40);
+          timerId = setTimeout(tick, 50);
           return;
         }
 
         setDetectedMarks(marks);
-        await lookupMarks(marks);
+        const key = marks.join("|");
+        if (key === lastKey) {
+          confirmCount += 1;
+        } else {
+          lastKey = key;
+          confirmCount = 1;
+          lastColor = color;
+        }
+
+        // 같은 표기 조합이 2번 연속이면 조회 (오인식 크게 감소)
+        if (confirmCount >= 2) {
+          await lookupMarks(marks, lastColor || color);
+          return;
+        }
+
+        setStatus("scanning");
+        timerId = setTimeout(tick, 60);
       } catch {
         if (!stopped && !cancelledRef.current && !processingRef.current) {
           setStatus("scanning");
@@ -745,8 +902,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   }, [cameraError, resumeKey]);
 
   const statusText = {
-    scanning: "여러 알약을 한 번에 인식할 수 있어요...",
-    ocr: "알약 표기를 읽고 있어요...",
+    scanning: "밝은 곳에서 표기가 위로 오게 맞춰주세요",
+    ocr: "표기를 정밀 분석 중...",
     loading: detectedMarks.length > 1
       ? `${detectedMarks.length}개 알약 정보를 불러오고 있어요...`
       : "알약 정보를 불러오고 있어요...",
