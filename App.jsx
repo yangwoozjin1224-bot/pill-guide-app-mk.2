@@ -496,6 +496,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   const [manualMark, setManualMark] = useState("");
   const [detectedMarks, setDetectedMarks] = useState([]);
   const [foundPills, setFoundPills] = useState([]);
+  const [pillBoxes, setPillBoxes] = useState([]);
   const cancelledRef = useRef(false);
   const processingRef = useRef(false);
   const videoRef = useRef(null);
@@ -522,7 +523,11 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     stopCamera();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" }, width: { ideal: 960 }, height: { ideal: 720 } },
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
         audio: false,
       });
       streamRef.current = stream;
@@ -580,10 +585,10 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
     const vw = video.videoWidth;
     const vh = video.videoHeight;
-    const crop = Math.min(vw, vh) * 0.78;
+    const crop = Math.min(vw, vh) * 0.85;
     const sx = (vw - crop) / 2;
     const sy = (vh - crop) / 2;
-    const out = 480;
+    const out = 520;
 
     if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
     const canvas = canvasRef.current;
@@ -594,6 +599,184 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
     ctx.drawImage(video, sx, sy, crop, crop, 0, 0, out, out);
     return canvas;
+  };
+
+  // 약봉지 안 알약들을 blob으로 분리 (연결요소 분석)
+  const segmentPillRegions = (canvas) => {
+    const w = canvas.width;
+    const h = canvas.height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return [];
+
+    // 빠른 분석을 위해 축소 마스크 사용
+    const sw = 140;
+    const sh = 140;
+    const scaleX = w / sw;
+    const scaleY = h / sh;
+    const small = document.createElement("canvas");
+    small.width = sw;
+    small.height = sh;
+    const sctx = small.getContext("2d", { willReadFrequently: true });
+    sctx.drawImage(canvas, 0, 0, sw, sh);
+    const img = sctx.getImageData(0, 0, sw, sh);
+    const d = img.data;
+
+    // 가장자리 픽셀로 배경색 추정 (약봉지 바탕)
+    let br = 0;
+    let bg = 0;
+    let bb = 0;
+    let bn = 0;
+    const sampleBorder = (x, y) => {
+      const i = (y * sw + x) * 4;
+      br += d[i];
+      bg += d[i + 1];
+      bb += d[i + 2];
+      bn += 1;
+    };
+    for (let x = 0; x < sw; x += 2) {
+      sampleBorder(x, 0);
+      sampleBorder(x, sh - 1);
+    }
+    for (let y = 0; y < sh; y += 2) {
+      sampleBorder(0, y);
+      sampleBorder(sw - 1, y);
+    }
+    br /= bn || 1;
+    bg /= bn || 1;
+    bb /= bn || 1;
+
+    // 배경과 색이 충분히 다른 픽셀 = 알약 후보
+    const mask = new Uint8Array(sw * sh);
+    for (let y = 2; y < sh - 2; y++) {
+      for (let x = 2; x < sw - 2; x++) {
+        const i = (y * sw + x) * 4;
+        const r = d[i];
+        const g = d[i + 1];
+        const b = d[i + 2];
+        const dist = Math.abs(r - br) + Math.abs(g - bg) + Math.abs(b - bb);
+        const maxc = Math.max(r, g, b);
+        const minc = Math.min(r, g, b);
+        const sat = maxc === 0 ? 0 : (maxc - minc) / maxc;
+        // 색 차이 크거나, 채도 있는 알약 색
+        if (dist > 70 || (sat > 0.22 && maxc > 90)) mask[y * sw + x] = 1;
+      }
+    }
+
+    // 연결요소 라벨링
+    const labels = new Int32Array(sw * sh);
+    let label = 0;
+    const comps = []; // {minX,minY,maxX,maxY,area}
+
+    const flood = (sx, sy, id) => {
+      const stack = [[sx, sy]];
+      let minX = sx;
+      let maxX = sx;
+      let minY = sy;
+      let maxY = sy;
+      let area = 0;
+      while (stack.length) {
+        const [x, y] = stack.pop();
+        const idx = y * sw + x;
+        if (x < 0 || y < 0 || x >= sw || y >= sh) continue;
+        if (!mask[idx] || labels[idx]) continue;
+        labels[idx] = id;
+        area += 1;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+      }
+      return { minX, maxX, minY, maxY, area };
+    };
+
+    for (let y = 0; y < sh; y++) {
+      for (let x = 0; x < sw; x++) {
+        const idx = y * sw + x;
+        if (mask[idx] && !labels[idx]) {
+          label += 1;
+          comps.push(flood(x, y, label));
+        }
+      }
+    }
+
+    const frameArea = sw * sh;
+    const boxes = comps
+      .filter((c) => {
+        const bw = c.maxX - c.minX + 1;
+        const bh = c.maxY - c.minY + 1;
+        const ratio = bw / Math.max(bh, 1);
+        // 알약 크기/형태 필터 (너무 작거나 전체 배경 blob 제외)
+        if (c.area < frameArea * 0.008 || c.area > frameArea * 0.35) return false;
+        if (ratio > 2.8 || ratio < 0.35) return false;
+        if (bw < 10 || bh < 10) return false;
+        return true;
+      })
+      .sort((a, b) => b.area - a.area)
+      .slice(0, 8);
+
+    // 원본 해상도 crop 생성
+    const crops = [];
+    for (const c of boxes) {
+      const pad = 6;
+      const x = Math.max(0, Math.floor((c.minX - pad) * scaleX));
+      const y = Math.max(0, Math.floor((c.minY - pad) * scaleY));
+      const cw = Math.min(w - x, Math.ceil((c.maxX - c.minX + 1 + pad * 2) * scaleX));
+      const ch = Math.min(h - y, Math.ceil((c.maxY - c.minY + 1 + pad * 2) * scaleY));
+      if (cw < 24 || ch < 24) continue;
+
+      const crop = document.createElement("canvas");
+      // OCR용으로 정사각 패딩
+      const side = Math.max(cw, ch, 120);
+      crop.width = side;
+      crop.height = side;
+      const cctx = crop.getContext("2d");
+      cctx.fillStyle = "#ffffff";
+      cctx.fillRect(0, 0, side, side);
+      const ox = Math.floor((side - cw) / 2);
+      const oy = Math.floor((side - ch) / 2);
+      cctx.drawImage(canvas, x, y, cw, ch, ox, oy, cw, ch);
+
+      crops.push({
+        canvas: crop,
+        box: {
+          // UI overlay용 (520 기준 정규화 %)
+          left: (x / w) * 100,
+          top: (y / h) * 100,
+          width: (cw / w) * 100,
+          height: (ch / h) * 100,
+        },
+      });
+    }
+
+    // blob이 거의 없으면 2x2 그리드로라도 분리 시도 (약봉지 대응)
+    if (crops.length < 2) {
+      const grid = [];
+      for (let gy = 0; gy < 2; gy++) {
+        for (let gx = 0; gx < 2; gx++) {
+          const gw = Math.floor(w / 2);
+          const gh = Math.floor(h / 2);
+          const x = gx * gw;
+          const y = gy * gh;
+          const crop = document.createElement("canvas");
+          crop.width = 200;
+          crop.height = 200;
+          crop.getContext("2d").drawImage(canvas, x, y, gw, gh, 0, 0, 200, 200);
+          grid.push({
+            canvas: crop,
+            box: {
+              left: (x / w) * 100,
+              top: (y / h) * 100,
+              width: (gw / w) * 100,
+              height: (gh / h) * 100,
+            },
+          });
+        }
+      }
+      return grid;
+    }
+
+    return crops;
   };
 
   // 여러 전처리 버전을 만들어 OCR 성공률을 올림
@@ -625,20 +808,17 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       return c;
     };
 
-    // 1) 고대비 그레이
     const contrast = makeFromPixels((r, g, b) => {
       let y = 0.299 * r + 0.587 * g + 0.114 * b;
       y = (y - 128) * 1.8 + 128;
       return Math.max(0, Math.min(255, y));
     });
 
-    // 2) 이진화 (밝은 알약 + 어두운 음각)
     const binary = makeFromPixels((r, g, b) => {
       const y = 0.299 * r + 0.587 * g + 0.114 * b;
       return y > 145 ? 255 : 0;
     });
 
-    // 3) 반전 이진화 (어두운 배경/밝은 글자)
     const inverted = makeFromPixels((r, g, b) => {
       const y = 0.299 * r + 0.587 * g + 0.114 * b;
       return y > 145 ? 0 : 255;
@@ -651,14 +831,13 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   const estimatePillColor = (canvas) => {
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return "";
-    const { width: w, height: h } = canvas;
-    const img = ctx.getImageData(Math.floor(w * 0.3), Math.floor(h * 0.3), Math.floor(w * 0.4), Math.floor(h * 0.4));
+    const { width: ww, height: hh } = canvas;
+    const img = ctx.getImageData(Math.floor(ww * 0.25), Math.floor(hh * 0.25), Math.floor(ww * 0.5), Math.floor(hh * 0.5));
     let r = 0;
     let g = 0;
     let b = 0;
     let n = 0;
     for (let i = 0; i < img.data.length; i += 16) {
-      // 너무 어두운/배경색 제외
       const rr = img.data[i];
       const gg = img.data[i + 1];
       const bb = img.data[i + 2];
@@ -692,13 +871,13 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     return "";
   };
 
-  // 여러 전처리 + 신뢰도 기반 표기 추출
-  const extractMarksWithOcr = async (canvas) => {
+  // 단일 crop OCR (전처리 2종만 — 속도/정확도 균형)
+  const ocrSingleCrop = async (cropCanvas) => {
     const worker = workerRef.current;
-    if (!worker) return { marks: [], color: "" };
+    if (!worker) return { mark: "", color: "", score: 0 };
 
-    const color = estimatePillColor(canvas);
-    const variants = buildPreprocessedCanvases(canvas);
+    const color = estimatePillColor(cropCanvas);
+    const variants = buildPreprocessedCanvases(cropCanvas).slice(0, 2);
     const scoreMap = new Map();
 
     for (const variant of variants) {
@@ -710,44 +889,71 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             const raw = String(w.text || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
             if (raw.length < 3 || raw.length > 12) continue;
             const conf = Number(w.confidence || 0);
-            if (conf < 45) continue;
-            const prev = scoreMap.get(raw) || 0;
-            scoreMap.set(raw, prev + conf + raw.length);
+            if (conf < 40) continue;
+            scoreMap.set(raw, (scoreMap.get(raw) || 0) + conf + raw.length);
           }
         } else {
           const text = (result?.data?.text || "").toUpperCase();
           const candidates = text.match(/[A-Z0-9]{3,12}/g) || [];
           for (const raw of candidates) {
-            const prev = scoreMap.get(raw) || 0;
-            scoreMap.set(raw, prev + 40 + raw.length);
+            scoreMap.set(raw, (scoreMap.get(raw) || 0) + 35 + raw.length);
           }
         }
-      } catch {
-        // 한 전처리 실패해도 계속
-      }
+      } catch {}
     }
 
-    const marks = Array.from(scoreMap.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([mark]) => mark)
-      .slice(0, 5);
-
-    return { marks, color };
+    const ranked = Array.from(scoreMap.entries()).sort((a, b) => b[1] - a[1]);
+    if (!ranked.length) return { mark: "", color, score: 0 };
+    return { mark: ranked[0][0], color, score: ranked[0][1] };
   };
 
-  const lookupMarks = async (marks, color = "") => {
+  // 알약 영역 분리 → 각각 OCR (약봉지 다중 알약 핵심)
+  const extractMarksWithOcr = async (canvas) => {
+    const regions = segmentPillRegions(canvas);
+    setPillBoxes(regions.map((r) => r.box));
+
+    const detections = [];
+    const seen = new Set();
+
+    for (const region of regions) {
+      const { mark, color, score } = await ocrSingleCrop(region.canvas);
+      if (!mark || score < 50) continue;
+      if (seen.has(mark)) continue;
+      seen.add(mark);
+      detections.push({ mark, color, score });
+      if (detections.length >= 6) break;
+    }
+
+    // 분리 실패 시 전체 프레임 fallback
+    if (!detections.length) {
+      const whole = await ocrSingleCrop(canvas);
+      if (whole.mark) detections.push(whole);
+    }
+
+    detections.sort((a, b) => b.score - a.score);
+    return {
+      detections,
+      marks: detections.map((d) => d.mark),
+    };
+  };
+
+  const lookupMarks = async (detections) => {
     processingRef.current = true;
     setStatus("loading");
+    const list = Array.isArray(detections)
+      ? detections.map((d) => (typeof d === "string" ? { mark: d, color: "" } : d))
+      : [];
+    const marks = list.map((d) => d.mark);
     setDetectedMarks(marks);
 
     try {
       const settled = await Promise.allSettled(
-        marks.map((mark) =>
+        list.map((d) =>
           fetchPillData(
             {
-              mark,
-              itemName: mark,
-              ...(color ? { color } : {}),
+              mark: d.mark,
+              itemName: d.mark,
+              ...(d.color ? { color: d.color } : {}),
             },
             schedule
           )
@@ -803,7 +1009,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       .split(/[\s,./|]+/)
       .map((m) => m.trim())
       .filter((m) => m.length >= 2);
-    await lookupMarks(marks.length ? marks : [manual]);
+    await lookupMarks(marks.length ? marks.map((m) => ({ mark: m, color: "" })) : [{ mark: manual, color: "" }]);
   };
 
   const openPill = (pill) => {
@@ -817,6 +1023,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   const resumeScanning = async () => {
     setFoundPills([]);
     setDetectedMarks([]);
+    setPillBoxes([]);
     setErrorMsg("");
     setManualMark("");
     processingRef.current = false;
@@ -825,7 +1032,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     setResumeKey((k) => k + 1);
   };
 
-  // 실시간 OCR 루프 (여러 표기 + 2프레임 확정으로 오인식 감소)
+  // 실시간 OCR 루프: 알약 영역 분리 → 각각 인식 → 2프레임 확정
   useEffect(() => {
     if (cameraError) return;
 
@@ -837,7 +1044,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     let stopped = false;
     let lastKey = "";
     let confirmCount = 0;
-    let lastColor = "";
+    let lastDetections = [];
 
     const tick = async () => {
       if (stopped || cancelledRef.current || processingRef.current) return;
@@ -855,10 +1062,10 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
       setStatus("ocr");
       try {
-        const { marks, color } = await extractMarksWithOcr(frame);
+        const { detections, marks } = await extractMarksWithOcr(frame);
         if (stopped || cancelledRef.current || processingRef.current) return;
 
-        if (!marks.length) {
+        if (!detections.length) {
           lastKey = "";
           confirmCount = 0;
           setDetectedMarks([]);
@@ -868,18 +1075,17 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         }
 
         setDetectedMarks(marks);
-        const key = marks.join("|");
+        const key = marks.slice().sort().join("|");
         if (key === lastKey) {
           confirmCount += 1;
         } else {
           lastKey = key;
           confirmCount = 1;
-          lastColor = color;
+          lastDetections = detections;
         }
 
-        // 같은 표기 조합이 2번 연속이면 조회 (오인식 크게 감소)
         if (confirmCount >= 2) {
-          await lookupMarks(marks, lastColor || color);
+          await lookupMarks(lastDetections.length ? lastDetections : detections);
           return;
         }
 
@@ -902,8 +1108,10 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   }, [cameraError, resumeKey]);
 
   const statusText = {
-    scanning: "밝은 곳에서 표기가 위로 오게 맞춰주세요",
-    ocr: "표기를 정밀 분석 중...",
+    scanning: "약봉지 안 알약을 하나씩 구분해서 인식합니다",
+    ocr: pillBoxes.length > 1
+      ? `${pillBoxes.length}개 알약 영역을 분석 중...`
+      : "알약 영역을 분리·분석 중...",
     loading: detectedMarks.length > 1
       ? `${detectedMarks.length}개 알약 정보를 불러오고 있어요...`
       : "알약 정보를 불러오고 있어요...",
