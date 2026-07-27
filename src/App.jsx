@@ -477,11 +477,12 @@ function SearchScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 }
 
 function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
-  const [status, setStatus] = useState("scanning"); // scanning | ocr | loading | found | error
+  const [status, setStatus] = useState("scanning"); // scanning | ocr | loading | results | error
   const [errorMsg, setErrorMsg] = useState("");
   const [cameraError, setCameraError] = useState("");
   const [manualMark, setManualMark] = useState("");
-  const [detectedMark, setDetectedMark] = useState("");
+  const [detectedMarks, setDetectedMarks] = useState([]);
+  const [foundPills, setFoundPills] = useState([]);
   const cancelledRef = useRef(false);
   const processingRef = useRef(false);
   const videoRef = useRef(null);
@@ -525,7 +526,6 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     }
   };
 
-  // 카메라 + OCR 워커를 한 번만 준비 (재사용이 속도의 핵심)
   useEffect(() => {
     let alive = true;
     cancelledRef.current = false;
@@ -533,12 +533,11 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     (async () => {
       await openCamera();
       try {
-        const worker = await Tesseract.createWorker("eng", 1, {
-          // logger 끔 = 불필요 오버헤드 감소
-        });
+        const worker = await Tesseract.createWorker("eng", 1, {});
+        // 여러 알약 표기를 동시에 잡기 위해 sparse text 모드 사용
         await worker.setParameters({
           tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-          tessedit_pageseg_mode: "7", // 한 줄 텍스트 (알약 표기용, 더 빠름)
+          tessedit_pageseg_mode: "11",
         });
         if (!alive) {
           await worker.terminate();
@@ -561,17 +560,17 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     };
   }, []);
 
-  // 중앙 프레임만 잘라 작은 이미지로 OCR (전체 프레임보다 훨씬 빠름)
-  const captureCenterFrame = () => {
+  // 여러 알약이 들어오도록 중앙 넓은 영역을 캡처
+  const captureFrame = () => {
     const video = videoRef.current;
     if (!video || !video.videoWidth || !video.videoHeight) return null;
 
     const vw = video.videoWidth;
     const vh = video.videoHeight;
-    const crop = Math.min(vw, vh) * 0.45; // 중앙 영역만
+    const crop = Math.min(vw, vh) * 0.72;
     const sx = (vw - crop) / 2;
     const sy = (vh - crop) / 2;
-    const out = 200; // OCR용 저해상도 (작을수록 빠름)
+    const out = 320;
 
     if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
     const canvas = canvasRef.current;
@@ -586,29 +585,70 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     return canvas;
   };
 
-  const extractMarkWithOcr = async (canvas) => {
+  // OCR에서 여러 표기를 한꺼번에 추출
+  const extractMarksWithOcr = async (canvas) => {
     const worker = workerRef.current;
-    if (!worker) return null;
+    if (!worker) return [];
 
     const result = await worker.recognize(canvas);
     const text = (result?.data?.text || "").toUpperCase();
     const candidates = text.match(/[A-Z0-9]{3,12}/g) || [];
-    if (!candidates.length) return null;
-    candidates.sort((a, b) => b.length - a.length);
-    return candidates[0].trim();
+    if (!candidates.length) return [];
+
+    // 중복 제거 + 짧은/노이즈성 표기 정리
+    const unique = [];
+    for (const raw of candidates) {
+      const mark = raw.trim();
+      if (mark.length < 3) continue;
+      if (unique.includes(mark)) continue;
+      unique.push(mark);
+      if (unique.length >= 5) break; // 한 번에 최대 5개
+    }
+    return unique;
   };
 
-  const lookupMark = async (mark) => {
+  const lookupMarks = async (marks) => {
     processingRef.current = true;
     setStatus("loading");
-    setDetectedMark(mark);
+    setDetectedMarks(marks);
+
     try {
-      const data = await fetchPillData({ mark, itemName: mark }, schedule);
+      const settled = await Promise.allSettled(
+        marks.map((mark) => fetchPillData({ mark, itemName: mark }, schedule))
+      );
       if (cancelledRef.current) return;
-      setStatus("found");
-      setDetailSource("scan");
-      setActivePill(data);
-      setScreen("detail");
+
+      const pills = [];
+      const seen = new Set();
+      settled.forEach((res, idx) => {
+        if (res.status !== "fulfilled" || !res.value) return;
+        const pill = res.value;
+        const key = String(pill.itemSeq || pill.id || marks[idx]);
+        if (seen.has(key)) return;
+        seen.add(key);
+        pills.push({ ...pill, detectedMark: marks[idx] });
+      });
+
+      if (!pills.length) {
+        setStatus("error");
+        setErrorMsg("인식된 표기로 약을 찾지 못했습니다. 직접 입력해보세요.");
+        processingRef.current = false;
+        return;
+      }
+
+      // 1개면 바로 상세, 여러 개면 목록
+      if (pills.length === 1) {
+        setStatus("found");
+        setDetailSource("scan");
+        setActivePill(pills[0]);
+        setScreen("detail");
+        return;
+      }
+
+      setFoundPills(pills);
+      setStatus("results");
+      processingRef.current = false;
+      stopCamera();
     } catch (err) {
       if (cancelledRef.current) return;
       setStatus("error");
@@ -621,10 +661,35 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     const manual = String(manualMark || "").trim();
     if (!manual) return;
     setErrorMsg("");
-    await lookupMark(manual);
+    // 쉼표/공백으로 여러 표기 입력 가능
+    const marks = manual
+      .toUpperCase()
+      .split(/[\s,./|]+/)
+      .map((m) => m.trim())
+      .filter((m) => m.length >= 2);
+    await lookupMarks(marks.length ? marks : [manual]);
   };
 
-  // 빠른 연속 OCR: 한 번 끝나면 바로 다음 프레임 분석 (고정 2.5초 대기 제거)
+  const openPill = (pill) => {
+    setDetailSource("scan");
+    setActivePill(pill);
+    setScreen("detail");
+  };
+
+  const [resumeKey, setResumeKey] = useState(0);
+
+  const resumeScanning = async () => {
+    setFoundPills([]);
+    setDetectedMarks([]);
+    setErrorMsg("");
+    setManualMark("");
+    processingRef.current = false;
+    setStatus("scanning");
+    await openCamera();
+    setResumeKey((k) => k + 1);
+  };
+
+  // 실시간 OCR 루프 (여러 표기 동시 인식)
   useEffect(() => {
     if (cameraError) return;
 
@@ -638,13 +703,12 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     const tick = async () => {
       if (stopped || cancelledRef.current || processingRef.current) return;
 
-      // 워커/카메라 준비 전이면 짧게 재시도
       if (!workerRef.current || !videoRef.current?.videoWidth) {
         timerId = setTimeout(tick, 80);
         return;
       }
 
-      const frame = captureCenterFrame();
+      const frame = captureFrame();
       if (!frame) {
         timerId = setTimeout(tick, 80);
         return;
@@ -652,20 +716,18 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
       setStatus("ocr");
       try {
-        const mark = await extractMarkWithOcr(frame);
+        const marks = await extractMarksWithOcr(frame);
         if (stopped || cancelledRef.current || processingRef.current) return;
 
-        if (!mark) {
-          setDetectedMark("");
+        if (!marks.length) {
+          setDetectedMarks([]);
           setStatus("scanning");
-          timerId = setTimeout(tick, 40); // 실패 시 바로 재시도
+          timerId = setTimeout(tick, 40);
           return;
         }
 
-        setDetectedMark(mark);
-        // 표기 한 번만 잡히면 즉시 조회
-        await lookupMark(mark);
-        return;
+        setDetectedMarks(marks);
+        await lookupMarks(marks);
       } catch {
         if (!stopped && !cancelledRef.current && !processingRef.current) {
           setStatus("scanning");
@@ -678,18 +740,67 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
     return () => {
       stopped = true;
-      cancelledRef.current = true;
       if (timerId) clearTimeout(timerId);
     };
-  }, [cameraError]);
+  }, [cameraError, resumeKey]);
 
   const statusText = {
-    scanning: "실시간으로 알약을 인식하고 있어요...",
+    scanning: "여러 알약을 한 번에 인식할 수 있어요...",
     ocr: "알약 표기를 읽고 있어요...",
-    loading: "알약 정보를 불러오고 있어요...",
+    loading: detectedMarks.length > 1
+      ? `${detectedMarks.length}개 알약 정보를 불러오고 있어요...`
+      : "알약 정보를 불러오고 있어요...",
     found: "알약을 인식했어요!",
+    results: `${foundPills.length}개 알약을 찾았어요`,
     error: errorMsg,
   }[status];
+
+  // 여러 알약 결과 목록 화면
+  if (status === "results") {
+    return (
+      <div className="flex flex-col h-full pb-6" style={{ backgroundColor: BG }}>
+        <div className="px-4 pt-5 pb-3 flex items-center gap-3 bg-white">
+          <button onClick={() => setScreen("home")} className="w-[40px] h-[40px] flex items-center justify-center">
+            <ChevronLeft size={28} color={BLACK} />
+          </button>
+          <p className="text-[18px] font-extrabold" style={{ color: BLACK }}>인식된 알약</p>
+        </div>
+
+        <div className="px-4 pt-3">
+          <p className="text-[14px] font-bold mb-3" style={{ color: GRAY2 }}>
+            {foundPills.length}개를 찾았습니다. 확인할 약을 선택하세요.
+          </p>
+          <div className="flex flex-col gap-2 overflow-y-auto" style={{ maxHeight: "560px" }}>
+            {foundPills.map((p) => (
+              <Card key={p.id} className="w-full flex items-center gap-3 px-3 py-3 text-left" onClick={() => openPill(p)}>
+                <div className="w-[56px] h-[56px] rounded-xl flex-shrink-0 overflow-hidden flex items-center justify-center" style={{ backgroundColor: "#F9FAFB" }}>
+                  {p.imageUrl ? (
+                    <img src={p.imageUrl} alt={p.name} className="w-full h-full object-contain" />
+                  ) : (
+                    <span className="text-[12px] font-bold" style={{ color: GRAY }}>약</span>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[15px] font-bold leading-tight" style={{ color: BLACK }}>{p.name}</p>
+                  <p className="text-[12px] mt-0.5 truncate" style={{ color: GRAY }}>
+                    {[p.detectedMark && `표기 ${p.detectedMark}`, p.tag].filter(Boolean).join(" · ")}
+                  </p>
+                </div>
+                <ChevronRight size={18} color={GRAY} />
+              </Card>
+            ))}
+          </div>
+          <button
+            onClick={resumeScanning}
+            className="w-full min-h-[48px] rounded-full font-bold text-[16px] mt-4"
+            style={{ backgroundColor: RED, color: "#fff" }}
+          >
+            다시 인식하기
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full" style={{ backgroundColor: "#000" }}>
@@ -715,9 +826,9 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           </div>
         ) : (
           <div
-            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[220px] h-[220px] rounded-3xl"
+            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[260px] h-[260px] rounded-3xl"
             style={{
-              border: `3px solid ${status === "found" || status === "loading" ? "#34D399" : "rgba(255,255,255,0.75)"}`,
+              border: `3px solid ${status === "loading" ? "#34D399" : "rgba(255,255,255,0.75)"}`,
               boxShadow: "0 0 0 9999px rgba(0,0,0,0.4)",
             }}
           />
@@ -728,9 +839,9 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         {status !== "error" ? (
           <div className="text-center">
             <p className="text-[15px] font-bold" style={{ color: BLACK }}>{statusText}</p>
-            {detectedMark && status !== "loading" && status !== "found" && (
+            {detectedMarks.length > 0 && status !== "loading" && (
               <p className="text-[13px] mt-1" style={{ color: GRAY2 }}>
-                인식된 표기: {detectedMark}
+                인식된 표기: {detectedMarks.join(", ")}
               </p>
             )}
           </div>
@@ -744,17 +855,24 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
                 onKeyDown={(e) => {
                   if (e.key === "Enter") runManualSearch();
                 }}
-                placeholder="알약 표기 직접 입력"
+                placeholder="표기 입력 (여러 개는 쉼표로)"
                 className="flex-1 text-[15px] outline-none bg-transparent"
                 style={{ color: BLACK }}
               />
             </Card>
             <button
               onClick={runManualSearch}
-              className="w-full min-h-[48px] rounded-full font-bold text-[16px]"
+              className="w-full min-h-[48px] rounded-full font-bold text-[16px] mb-2"
               style={{ backgroundColor: RED, color: "#fff" }}
             >
               입력으로 검색
+            </button>
+            <button
+              onClick={resumeScanning}
+              className="w-full min-h-[44px] rounded-full font-bold text-[15px]"
+              style={{ backgroundColor: BLACK, color: "#fff" }}
+            >
+              다시 인식하기
             </button>
           </div>
         )}
