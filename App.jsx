@@ -1399,45 +1399,104 @@ function extractDrugNameCandidates(ocrText) {
   return found.slice(0, 8);
 }
 
-function ManagementScreen({ setScreen, schedule, addToSchedule }) {
+function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChange }) {
   const [takenIds, setTakenIds] = useState([]);
-  const [status, setStatus] = useState("idle"); // idle | reading | looking | done | error
+  const [view, setView] = useState("list"); // list | camera
+  const [status, setStatus] = useState("ready"); // ready | reading | looking | done | error
   const [msg, setMsg] = useState("");
-  const [previewUrl, setPreviewUrl] = useState("");
   const [foundNames, setFoundNames] = useState([]);
-  const fileRef = useRef(null);
+  const [cameraError, setCameraError] = useState("");
+  const [snapUrl, setSnapUrl] = useState("");
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
 
   const toggleTaken = (id) => setTakenIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
-  const resetScan = () => {
-    setStatus("idle");
-    setMsg("");
-    setFoundNames([]);
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    setPreviewUrl("");
-    if (fileRef.current) fileRef.current.value = "";
+  const stopCamera = () => {
+    if (!streamRef.current) return;
+    streamRef.current.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
   };
 
-  const processImageFile = async (file) => {
-    if (!file) return;
-    setStatus("idle");
+  const openCamera = async () => {
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      setCameraError("카메라를 지원하지 않는 브라우저입니다.");
+      return false;
+    }
+    if (!window.isSecureContext) {
+      setCameraError("HTTPS 또는 localhost에서만 카메라를 사용할 수 있습니다.");
+      return false;
+    }
+    setCameraError("");
+    stopCamera();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        try {
+          await videoRef.current.play();
+        } catch {}
+      }
+      return true;
+    } catch {
+      setCameraError("카메라 권한을 허용해주세요.");
+      return false;
+    }
+  };
+
+  const startCameraView = async () => {
+    setView("camera");
+    onCameraModeChange?.(true);
+    setStatus("ready");
     setMsg("");
     setFoundNames([]);
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    if (snapUrl) {
+      URL.revokeObjectURL(snapUrl);
+      setSnapUrl("");
+    }
+    await openCamera();
+  };
 
-    const url = URL.createObjectURL(file);
-    setPreviewUrl(url);
+  const backToList = () => {
+    stopCamera();
+    setView("list");
+    onCameraModeChange?.(false);
+    setStatus("ready");
+    setMsg("");
+    setFoundNames([]);
+    setCameraError("");
+    if (snapUrl) {
+      URL.revokeObjectURL(snapUrl);
+      setSnapUrl("");
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      stopCamera();
+      onCameraModeChange?.(false);
+    };
+  }, []);
+
+  const processCapturedCanvas = async (canvas) => {
     setStatus("reading");
     setMsg("처방전/약봉지 글자를 읽고 있어요...");
-
     try {
-      const result = await Tesseract.recognize(file, "kor+eng", {});
+      const result = await Tesseract.recognize(canvas, "kor+eng", {});
       const text = result?.data?.text || "";
       const candidates = extractDrugNameCandidates(text);
 
       if (!candidates.length) {
         setStatus("error");
-        setMsg("약 이름을 읽지 못했습니다. 글자가 선명하게 나오게 다시 촬영해주세요.");
+        setMsg("약 이름을 읽지 못했습니다. 다시 촬영해주세요.");
         return;
       }
 
@@ -1447,7 +1506,6 @@ function ManagementScreen({ setScreen, schedule, addToSchedule }) {
 
       let added = 0;
       const failed = [];
-
       for (const name of candidates) {
         try {
           const list = await searchPillList(name);
@@ -1478,7 +1536,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule }) {
 
       if (added === 0) {
         setStatus("error");
-        setMsg("약은 읽었지만 공공 API에서 정보를 찾지 못했습니다. 약 찾기로 직접 검색해보세요.");
+        setMsg("약은 읽었지만 정보를 찾지 못했습니다. 다시 촬영하거나 약 찾기를 이용해주세요.");
         return;
       }
 
@@ -1495,11 +1553,138 @@ function ManagementScreen({ setScreen, schedule, addToSchedule }) {
     }
   };
 
-  const onPickFile = (e) => {
-    const file = e.target.files?.[0];
-    if (file) processImageFile(file);
+  const takePhoto = async () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) {
+      setStatus("error");
+      setMsg("카메라가 아직 준비되지 않았습니다.");
+      return;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    // 미리보기용
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      if (snapUrl) URL.revokeObjectURL(snapUrl);
+      setSnapUrl(URL.createObjectURL(blob));
+    }, "image/jpeg", 0.9);
+
+    stopCamera();
+    await processCapturedCanvas(canvas);
   };
 
+  const retake = async () => {
+    setStatus("ready");
+    setMsg("");
+    setFoundNames([]);
+    if (snapUrl) {
+      URL.revokeObjectURL(snapUrl);
+      setSnapUrl("");
+    }
+    await openCamera();
+  };
+
+  // ---- 카메라 촬영 화면 (실시간 인식 X, 버튼으로 1장 촬영) ----
+  if (view === "camera") {
+    const busy = status === "reading" || status === "looking";
+    return (
+      <div className="flex flex-col h-full" style={{ backgroundColor: "#000" }}>
+        <div className="px-4 pt-5 pb-3 flex items-center gap-3">
+          <button onClick={backToList} className="w-[40px] h-[40px] flex items-center justify-center">
+            <ChevronLeft size={28} color="#fff" />
+          </button>
+          <p className="text-[18px] font-bold text-white">처방전 / 약봉지 촬영</p>
+        </div>
+
+        <div className="flex-1 relative overflow-hidden">
+          {snapUrl && status !== "ready" ? (
+            <img src={snapUrl} alt="촬영 사진" className="absolute inset-0 w-full h-full object-cover" />
+          ) : (
+            <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover" />
+          )}
+
+          {cameraError ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 px-8" style={{ backgroundColor: BG }}>
+              <p className="text-[15px] text-center leading-relaxed" style={{ color: BLACK }}>{cameraError}</p>
+              <button
+                onClick={openCamera}
+                className="min-h-[44px] px-5 rounded-full font-bold text-[15px]"
+                style={{ backgroundColor: RED, color: "#fff" }}
+              >
+                다시 시도
+              </button>
+            </div>
+          ) : status === "ready" ? (
+            <div
+              className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[280px] h-[360px] rounded-2xl"
+              style={{ border: "3px solid rgba(255,255,255,0.75)", boxShadow: "0 0 0 9999px rgba(0,0,0,0.35)" }}
+            />
+          ) : null}
+        </div>
+
+        <div className="px-5 py-4" style={{ backgroundColor: CARD }}>
+          {status === "ready" && (
+            <>
+              <p className="text-[14px] text-center font-bold mb-3" style={{ color: BLACK }}>
+                처방전/약봉지를 맞춘 뒤 촬영하세요
+              </p>
+              <button
+                onClick={takePhoto}
+                className="w-full min-h-[52px] rounded-full font-bold text-[17px]"
+                style={{ backgroundColor: RED, color: "#fff" }}
+              >
+                촬영하기
+              </button>
+            </>
+          )}
+
+          {busy && (
+            <p className="text-[15px] text-center font-bold" style={{ color: BLACK }}>
+              {msg || "처리 중..."}
+            </p>
+          )}
+
+          {(status === "done" || status === "error") && (
+            <div>
+              <p
+                className="text-[14px] text-center font-bold mb-2 leading-relaxed"
+                style={{ color: status === "error" ? RED : GREEN }}
+              >
+                {msg}
+              </p>
+              {foundNames.length > 0 && (
+                <p className="text-[12px] text-center mb-3" style={{ color: GRAY }}>
+                  인식된 이름: {foundNames.join(", ")}
+                </p>
+              )}
+              <button
+                onClick={retake}
+                className="w-full min-h-[48px] rounded-full font-bold text-[16px] mb-2"
+                style={{ backgroundColor: RED, color: "#fff" }}
+              >
+                다시 촬영하기
+              </button>
+              <button
+                onClick={backToList}
+                className="w-full min-h-[44px] rounded-full font-bold text-[15px]"
+                style={{ backgroundColor: BLACK, color: "#fff" }}
+              >
+                복용 관리로 돌아가기
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ---- 목록 화면 ----
   return (
     <div className="flex flex-col h-full overflow-y-auto pb-24" style={{ backgroundColor: BG }}>
       <div className="px-5 pt-6 pb-3 bg-white">
@@ -1510,58 +1695,16 @@ function ManagementScreen({ setScreen, schedule, addToSchedule }) {
         <Card className="p-4">
           <p className="text-[16px] font-extrabold" style={{ color: BLACK }}>처방전 · 약봉지 등록</p>
           <p className="text-[13px] mt-1 leading-relaxed" style={{ color: GRAY2 }}>
-            처방전이나 약봉지를 촬영하면 약 이름을 읽어 복용 관리에 추가합니다.
+            카메라를 켜고 촬영하면 약 이름을 읽어 복용 관리에 추가합니다.
           </p>
-
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/*"
-            capture="environment"
-            className="hidden"
-            onChange={onPickFile}
-          />
-
           <button
-            onClick={() => fileRef.current?.click()}
-            disabled={status === "reading" || status === "looking"}
-            className="w-full min-h-[48px] rounded-full font-bold text-[16px] mt-3 flex items-center justify-center gap-2 disabled:opacity-50"
+            onClick={startCameraView}
+            className="w-full min-h-[48px] rounded-full font-bold text-[16px] mt-3 flex items-center justify-center gap-2"
             style={{ backgroundColor: RED, color: "#fff" }}
           >
-            <FileText size={18} />
-            {status === "reading" || status === "looking" ? "인식 중..." : "처방전 / 약봉지 촬영"}
+            <Camera size={18} />
+            처방전 / 약봉지 촬영
           </button>
-
-          {previewUrl && (
-            <div className="mt-3 w-full h-[120px] rounded-xl overflow-hidden" style={{ backgroundColor: "#F9FAFB" }}>
-              <img src={previewUrl} alt="촬영 미리보기" className="w-full h-full object-contain" />
-            </div>
-          )}
-
-          {msg && (
-            <p
-              className="text-[13px] font-bold mt-3 text-center leading-relaxed"
-              style={{ color: status === "error" ? RED : status === "done" ? GREEN : GRAY2 }}
-            >
-              {msg}
-            </p>
-          )}
-
-          {foundNames.length > 0 && (status === "looking" || status === "done" || status === "error") && (
-            <p className="text-[12px] mt-2 text-center" style={{ color: GRAY }}>
-              인식된 이름: {foundNames.join(", ")}
-            </p>
-          )}
-
-          {(status === "done" || status === "error") && (
-            <button
-              onClick={resetScan}
-              className="w-full min-h-[40px] rounded-full font-bold text-[14px] mt-2"
-              style={{ backgroundColor: BLACK, color: "#fff" }}
-            >
-              다시 촬영하기
-            </button>
-          )}
         </Card>
       </div>
 
@@ -1570,7 +1713,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule }) {
           <p className="text-[15px] text-center" style={{ color: GRAY }}>
             등록된 약이 없습니다.
             <br />
-            위 버튼으로 처방전/약봉지를 등록해보세요.
+            위 버튼으로 처방전/약봉지를 촬영해보세요.
           </p>
         </div>
       ) : (
@@ -1620,6 +1763,7 @@ export default function App() {
   const [activePill, setActivePill] = useState(null);
   const [detailSource, setDetailSource] = useState("search");
   const [schedule, setSchedule] = useState([]);
+  const [mgmtCamera, setMgmtCamera] = useState(false);
 
   const addToSchedule = (pill) => {
     setSchedule((prev) => (prev.find((p) => p.id === pill.id) ? prev : [...prev, pill]));
@@ -1636,9 +1780,14 @@ export default function App() {
         {screen === "scan" && <ScanScreen setScreen={setScreen} setActivePill={setActivePill} setDetailSource={setDetailSource} schedule={schedule} />}
         {screen === "detail" && <DetailScreen setScreen={setScreen} pill={activePill} addToSchedule={addToSchedule} detailSource={detailSource} />}
         {screen === "management" && (
-          <ManagementScreen setScreen={setScreen} schedule={schedule} addToSchedule={addToSchedule} />
+          <ManagementScreen
+            setScreen={setScreen}
+            schedule={schedule}
+            addToSchedule={addToSchedule}
+            onCameraModeChange={setMgmtCamera}
+          />
         )}
-        {screen !== "scan" && <BottomNav screen={screen} setScreen={setScreen} />}
+        {screen !== "scan" && !mgmtCamera && <BottomNav screen={screen} setScreen={setScreen} />}
       </div>
     </div>
   );
