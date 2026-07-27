@@ -139,12 +139,6 @@ async function fetchEasyDrugInfo(itemSeq) {
 // ---- 파이프라인: 4개 API를 순차/병렬로 호출해 하나의 알약 데이터 객체로 병합 ----
 // 1) 낱알식별 API로 itemSeq를 먼저 확보(선행 필요) → 2~4) 나머지 3개는 병렬 호출
 async function fetchPillData(params = {}, currentSchedule = []) {
-  if (!HAS_API_KEY) {
-    throw new Error(
-      "공공데이터 API 서비스 키가 설정되어 있지 않습니다. .env에 VITE_API_KEY(또는 REACT_APP_API_KEY)를 넣어주세요."
-    );
-  }
-
   try {
     const identification = await fetchPillIdentification(params);
     const { itemSeq } = identification;
