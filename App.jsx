@@ -975,7 +975,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       if (!pills.length) {
         setStatus("error");
         setErrorMsg("인식된 표기로 약을 찾지 못했습니다. 직접 입력해보세요.");
-        processingRef.current = false;
+        processingRef.current = true; // 루프 재개 방지
         return;
       }
 
@@ -989,13 +989,13 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
       setFoundPills(pills);
       setStatus("results");
-      processingRef.current = false;
+      processingRef.current = true;
       stopCamera();
     } catch (err) {
       if (cancelledRef.current) return;
       setStatus("error");
       setErrorMsg(err.message || "알약을 찾을 수 없습니다");
-      processingRef.current = false;
+      processingRef.current = true;
     }
   };
 
@@ -1032,49 +1032,71 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     setResumeKey((k) => k + 1);
   };
 
-  // 실시간 OCR 루프: 알약 영역 분리 → 각각 인식 → 2프레임 확정
+  // 실시간 OCR 루프: 하단 문구는 scanning/loading/error만 사용해 깜빡임 제거
   useEffect(() => {
     if (cameraError) return;
 
     cancelledRef.current = false;
     processingRef.current = false;
     setStatus("scanning");
+    setDetectedMarks([]);
+    setPillBoxes([]);
+    setErrorMsg("");
 
     let timerId = null;
     let stopped = false;
     let lastKey = "";
     let confirmCount = 0;
     let lastDetections = [];
+    let emptyTries = 0;
+    let totalTries = 0;
+
+    const fail = (msg) => {
+      stopped = true;
+      processingRef.current = true;
+      setStatus("error");
+      setErrorMsg(msg);
+      setDetectedMarks([]);
+    };
 
     const tick = async () => {
       if (stopped || cancelledRef.current || processingRef.current) return;
 
       if (!workerRef.current || !videoRef.current?.videoWidth) {
-        timerId = setTimeout(tick, 80);
+        timerId = setTimeout(tick, 120);
         return;
       }
 
       const frame = captureFrame();
       if (!frame) {
-        timerId = setTimeout(tick, 80);
+        timerId = setTimeout(tick, 120);
         return;
       }
 
-      setStatus("ocr");
+      totalTries += 1;
+      if (totalTries > 18) {
+        fail("알약 인식에 실패했습니다. 밝은 곳에서 다시 시도하거나 표기를 직접 입력해주세요.");
+        return;
+      }
+
       try {
         const { detections, marks } = await extractMarksWithOcr(frame);
         if (stopped || cancelledRef.current || processingRef.current) return;
 
         if (!detections.length) {
+          emptyTries += 1;
           lastKey = "";
           confirmCount = 0;
-          setDetectedMarks([]);
-          setStatus("scanning");
-          timerId = setTimeout(tick, 50);
+          if (emptyTries >= 10) {
+            fail("알약을 찾지 못했습니다. 약봉지를 펼쳐 알약이 보이게 한 뒤 다시 시도해주세요.");
+            return;
+          }
+          // status는 scanning 유지 (문구 깜빡임 방지)
+          timerId = setTimeout(tick, 200);
           return;
         }
 
-        setDetectedMarks(marks);
+        emptyTries = 0;
         const key = marks.slice().sort().join("|");
         if (key === lastKey) {
           confirmCount += 1;
@@ -1085,21 +1107,20 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         }
 
         if (confirmCount >= 2) {
+          setDetectedMarks(marks);
           await lookupMarks(lastDetections.length ? lastDetections : detections);
           return;
         }
 
-        setStatus("scanning");
-        timerId = setTimeout(tick, 60);
+        timerId = setTimeout(tick, 180);
       } catch {
         if (!stopped && !cancelledRef.current && !processingRef.current) {
-          setStatus("scanning");
-          timerId = setTimeout(tick, 80);
+          timerId = setTimeout(tick, 200);
         }
       }
     };
 
-    timerId = setTimeout(tick, 100);
+    timerId = setTimeout(tick, 250);
 
     return () => {
       stopped = true;
@@ -1108,14 +1129,9 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   }, [cameraError, resumeKey]);
 
   const statusText = {
-    scanning: "약봉지 안 알약을 하나씩 구분해서 인식합니다",
-    ocr: pillBoxes.length > 1
-      ? `${pillBoxes.length}개 알약 영역을 분석 중...`
-      : "알약 영역을 분리·분석 중...",
-    loading: detectedMarks.length > 1
-      ? `${detectedMarks.length}개 알약 정보를 불러오고 있어요...`
-      : "알약 정보를 불러오고 있어요...",
-    found: "알약을 인식했어요!",
+    scanning: "알약을 인식하고 있어요",
+    loading: "약 정보를 불러오고 있어요",
+    found: "알약을 인식했어요",
     results: `${foundPills.length}개 알약을 찾았어요`,
     error: errorMsg,
   }[status];
@@ -1191,12 +1207,27 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           </div>
         ) : (
           <div
-            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[260px] h-[260px] rounded-3xl"
+            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[280px] h-[280px] rounded-3xl overflow-hidden"
             style={{
               border: `3px solid ${status === "loading" ? "#34D399" : "rgba(255,255,255,0.75)"}`,
               boxShadow: "0 0 0 9999px rgba(0,0,0,0.4)",
             }}
-          />
+          >
+            {pillBoxes.map((box, i) => (
+              <div
+                key={i}
+                className="absolute rounded-lg"
+                style={{
+                  left: `${box.left}%`,
+                  top: `${box.top}%`,
+                  width: `${box.width}%`,
+                  height: `${box.height}%`,
+                  border: "2px solid #34D399",
+                  backgroundColor: "rgba(52, 211, 153, 0.15)",
+                }}
+              />
+            ))}
+          </div>
         )}
       </div>
 
@@ -1204,11 +1235,6 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         {status !== "error" ? (
           <div className="text-center">
             <p className="text-[15px] font-bold" style={{ color: BLACK }}>{statusText}</p>
-            {detectedMarks.length > 0 && status !== "loading" && (
-              <p className="text-[13px] mt-1" style={{ color: GRAY2 }}>
-                인식된 표기: {detectedMarks.join(", ")}
-              </p>
-            )}
           </div>
         ) : (
           <div>
