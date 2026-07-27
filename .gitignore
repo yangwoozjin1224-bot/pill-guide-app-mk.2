@@ -2,3 +2,15 @@ node_modules
 dist
 .env
 .DS_Store
+
+# Android
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/captures/
+android/.cxx/
+*.apk
+*.aab
+*.keystore

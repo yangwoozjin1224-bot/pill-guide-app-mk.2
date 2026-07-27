@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">필가이드</string>
+    <string name="nav_home">홈</string>
+    <string name="nav_search">약 찾기</string>
+    <string name="nav_scan">촬영</string>
+    <string name="nav_management">복용관리</string>
+    <string name="tts_pill_intro">이 약은 %1$s입니다. %2$s. %3$s</string>
+    <string name="tts_registered">복용 관리에 등록되었습니다</string>
+    <string name="scan_hint">알약 각인이 선명하게 보이도록 가까이 맞춰 주세요</string>
+    <string name="permission_camera_rationale">알약 촬영을 위해 카메라 권한이 필요합니다</string>
+    <string name="cd_speak">음성으로 읽어주기</string>
+    <string name="cd_take_photo">사진 촬영</string>
+    <string name="cd_pick_gallery">갤러리에서 사진 선택</string>
+</resources>

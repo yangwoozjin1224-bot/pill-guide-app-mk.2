@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="pill_red">#E53E3E</color>
+    <color name="pill_bg">#F5F5F7</color>
+    <color name="pill_black">#1A1A1A</color>
+    <color name="pill_gray">#9CA3AF</color>
+    <color name="pill_green">#059669</color>
+    <color name="ic_launcher_background">#E53E3E</color>
+</resources>
