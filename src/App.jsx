@@ -475,39 +475,71 @@ function ScanScreen({ setScreen, setActivePill, schedule }) {
   const [status, setStatus] = useState("scanning"); // scanning -> found -> loading -> error
   const [errorMsg, setErrorMsg] = useState("");
   const [cameraError, setCameraError] = useState("");
+  const [cameraReady, setCameraReady] = useState(false);
+  const [requestingCamera, setRequestingCamera] = useState(false);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
 
+  const stopCamera = () => {
+    if (!streamRef.current) return;
+    streamRef.current.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  };
+
+  const openCamera = async () => {
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      setCameraReady(false);
+      setCameraError("이 브라우저에서는 카메라를 지원하지 않아요.");
+      return false;
+    }
+
+    if (!window.isSecureContext) {
+      setCameraReady(false);
+      setCameraError("카메라는 HTTPS 또는 localhost 환경에서만 동작해요.");
+      return false;
+    }
+
+    setRequestingCamera(true);
+    setCameraError("");
+    stopCamera();
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        try {
+          await videoRef.current.play();
+        } catch (playErr) {
+          console.warn("카메라 자동재생 실패:", playErr);
+        }
+      }
+
+      setCameraReady(true);
+      return true;
+    } catch (err) {
+      console.error("카메라 접근 실패:", err);
+      setCameraReady(false);
+      setCameraError("카메라를 사용할 수 없어요. 카메라 접근 권한을 허용한 뒤 다시 시도해주세요.");
+      return false;
+    } finally {
+      setRequestingCamera(false);
+    }
+  };
+
   // 실제 기기 카메라 켜기
   useEffect(() => {
-    let cancelled = false;
-    async function openCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment" },
-          audio: false,
-        });
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-        setCameraError("");
-      } catch (err) {
-        console.error("카메라 접근 실패:", err);
-        setCameraError("카메라를 사용할 수 없어요. 카메라 접근 권한을 허용해주세요.");
-      }
-    }
     openCamera();
     return () => {
-      cancelled = true;
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
+      stopCamera();
     };
   }, []);
 
@@ -562,7 +594,16 @@ function ScanScreen({ setScreen, setActivePill, schedule }) {
         {/* 카메라를 못 켤 때의 대체 배경 */}
         {cameraError && (
           <div className="absolute inset-0 flex items-center justify-center px-8" style={{ backgroundColor: "#0B0F14" }}>
-            <p className="text-[16px] text-gray-300 text-center leading-relaxed">📷 {cameraError}</p>
+            <div className="text-center">
+              <p className="text-[16px] text-gray-300 leading-relaxed">📷 {cameraError}</p>
+              <button
+                onClick={openCamera}
+                className="mt-4 min-h-[44px] px-4 rounded-xl font-bold text-[15px]"
+                style={{ backgroundColor: "#FFFFFF", color: "#111827" }}
+              >
+                카메라 다시 켜기
+              </button>
+            </div>
           </div>
         )}
 
@@ -613,6 +654,16 @@ function ScanScreen({ setScreen, setActivePill, schedule }) {
               다시 촬영하기
             </BigButton>
           </div>
+        )}
+        {requestingCamera && (
+          <p className="text-[14px] text-center mt-2" style={{ color: "#9CA3AF" }}>
+            카메라를 연결하고 있어요...
+          </p>
+        )}
+        {!requestingCamera && cameraReady && (
+          <p className="text-[14px] text-center mt-2" style={{ color: "#9CA3AF" }}>
+            카메라 연결 완료
+          </p>
         )}
       </div>
 
