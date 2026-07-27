@@ -274,10 +274,7 @@ function HomeScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     <div className="flex flex-col h-full overflow-y-auto pb-24" style={{ backgroundColor: BG }}>
       {/* Header */}
       <div className="px-5 pt-6 pb-4 flex items-center justify-between bg-white">
-        <div className="flex items-center gap-2">
-          <span className="text-[28px]">🏥</span>
-          <p className="text-[22px] font-extrabold" style={{ color: BLACK }}>양우진 님</p>
-        </div>
+        <p className="text-[22px] font-extrabold" style={{ color: BLACK }}>양우진 님</p>
         <span className="text-[20px]" style={{ color: GRAY }}>•••</span>
       </div>
 
@@ -571,10 +568,10 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
     const vw = video.videoWidth;
     const vh = video.videoHeight;
-    const crop = Math.min(vw, vh) * 0.5; // 중앙 50% 영역
+    const crop = Math.min(vw, vh) * 0.45; // 중앙 영역만
     const sx = (vw - crop) / 2;
     const sy = (vh - crop) / 2;
-    const out = 280; // OCR용 저해상도
+    const out = 200; // OCR용 저해상도 (작을수록 빠름)
 
     if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
     const canvas = canvasRef.current;
@@ -643,13 +640,13 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
       // 워커/카메라 준비 전이면 짧게 재시도
       if (!workerRef.current || !videoRef.current?.videoWidth) {
-        timerId = setTimeout(tick, 200);
+        timerId = setTimeout(tick, 80);
         return;
       }
 
       const frame = captureCenterFrame();
       if (!frame) {
-        timerId = setTimeout(tick, 200);
+        timerId = setTimeout(tick, 80);
         return;
       }
 
@@ -661,23 +658,23 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         if (!mark) {
           setDetectedMark("");
           setStatus("scanning");
-          timerId = setTimeout(tick, 120); // 실패 시 바로 재시도
+          timerId = setTimeout(tick, 40); // 실패 시 바로 재시도
           return;
         }
 
         setDetectedMark(mark);
-        // 표기 한 번만 잡히면 즉시 조회 (이전: 2회 연속 + 2.5초 간격)
+        // 표기 한 번만 잡히면 즉시 조회
         await lookupMark(mark);
         return;
       } catch {
         if (!stopped && !cancelledRef.current && !processingRef.current) {
           setStatus("scanning");
-          timerId = setTimeout(tick, 200);
+          timerId = setTimeout(tick, 80);
         }
       }
     };
 
-    timerId = setTimeout(tick, 300);
+    timerId = setTimeout(tick, 100);
 
     return () => {
       stopped = true;
@@ -717,22 +714,13 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             </button>
           </div>
         ) : (
-          <>
-            <div
-              className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[220px] h-[220px] rounded-3xl relative"
-              style={{
-                border: `3px solid ${status === "found" || status === "loading" ? "#34D399" : "rgba(255,255,255,0.75)"}`,
-                boxShadow: "0 0 0 9999px rgba(0,0,0,0.4)",
-              }}
-            >
-              {(status === "scanning" || status === "ocr") && (
-                <div
-                  className="absolute left-3 right-3 h-[2px] rounded"
-                  style={{ backgroundColor: "#fff", animation: "scanline 1.4s linear infinite" }}
-                />
-              )}
-            </div>
-          </>
+          <div
+            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[220px] h-[220px] rounded-3xl"
+            style={{
+              border: `3px solid ${status === "found" || status === "loading" ? "#34D399" : "rgba(255,255,255,0.75)"}`,
+              boxShadow: "0 0 0 9999px rgba(0,0,0,0.4)",
+            }}
+          />
         )}
       </div>
 
@@ -771,14 +759,6 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           </div>
         )}
       </div>
-
-      <style>{`
-        @keyframes scanline {
-          0% { top: 12px; }
-          50% { top: 200px; }
-          100% { top: 12px; }
-        }
-      `}</style>
     </div>
   );
 }
