@@ -1,8 +1,15 @@
 /**
- * 단계별 성능 측정 구조
- * Detection Recall / Precision, Classification Accuracy, OCR Accuracy, End-to-End
- * 실제 GT가 없으면 세션 로그로 누적해 디버그/추후 평가에 사용
+ * Evaluation metrics for Vision Search:
+ * Detection Accuracy, OCR Accuracy, Retrieval Recall@5/@10, Final Accuracy
  */
+
+import {
+  getEvalMetrics,
+  formatEvalSummary as formatVisionEval,
+  logEvalSample,
+  resetEval,
+  logRetrievalRun,
+} from "./search/evaluate.js";
 
 const empty = () => ({
   detection: { tp: 0, fp: 0, fn: 0, runs: 0 },
@@ -16,6 +23,7 @@ let store = empty();
 
 export function resetMetrics() {
   store = empty();
+  resetEval();
 }
 
 export function getMetrics() {
@@ -29,18 +37,22 @@ export function getMetrics() {
   const ocrAcc =
     store.ocr.total > 0 ? store.ocr.correct / store.ocr.total : null;
   const e2eTotal = store.endToEnd.success + store.endToEnd.fail;
-  const e2e = e2eTotal > 0 ? store.endToEnd.success / e2eTotal : null;
+  const e2eAcc = e2eTotal > 0 ? store.endToEnd.success / e2eTotal : null;
+  const vision = getEvalMetrics();
   return {
     detectionRecall: recall,
     detectionPrecision: precision,
+    detectionAccuracy: vision.detectionAccuracy,
     classificationAccuracy: cls,
-    ocrAccuracy: ocrAcc,
-    endToEndAccuracy: e2e,
-    raw: { ...store },
+    ocrAccuracy: vision.ocrAccuracy ?? ocrAcc,
+    recallAt5: vision.recallAt5,
+    recallAt10: vision.recallAt10,
+    finalAccuracy: vision.finalAccuracy ?? e2eAcc,
+    endToEndAccuracy: e2eAcc,
+    raw: { legacy: { ...store }, vision: vision.raw },
   };
 }
 
-/** Detection 한 번 실행 기록 (GT 없으면 detectedCount만 로그) */
 export function logDetectionRun({ detectedCount, tp, fp, fn } = {}) {
   store.detection.runs += 1;
   if (typeof tp === "number") store.detection.tp += tp;
@@ -73,11 +85,13 @@ export function logEndToEnd({ success }) {
 export function formatMetricsSummary(m = getMetrics()) {
   const pct = (v) => (v == null ? "—" : `${(v * 100).toFixed(1)}%`);
   return {
-    "Detection Recall": pct(m.detectionRecall),
-    "Detection Precision": pct(m.detectionPrecision),
-    "Classification Accuracy": pct(m.classificationAccuracy),
+    "Detection Accuracy": pct(m.detectionAccuracy),
     "OCR Accuracy": pct(m.ocrAccuracy),
-    "End-to-End Accuracy": pct(m.endToEndAccuracy),
-    "Last detections": m.raw.lastRun?.detectedCount ?? "—",
+    "Retrieval Recall@5": pct(m.recallAt5),
+    "Retrieval Recall@10": pct(m.recallAt10),
+    "Final Accuracy": pct(m.finalAccuracy),
+    "Last detections": m.raw?.legacy?.lastRun?.detectedCount ?? "—",
   };
 }
+
+export { logEvalSample, logRetrievalRun, getEvalMetrics, resetEval, formatVisionEval };

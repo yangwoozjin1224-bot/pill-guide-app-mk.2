@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 import { Home, Search, Camera, Clock, ChevronLeft, ChevronRight, Volume2, Check } from "lucide-react";
 import {
-  recognizePillsPipeline,
+  runVisionSearch,
   recognizeDocumentPipeline,
   terminateOcrWorker,
+  getSessionBagHints,
+  setSessionBagContext,
 } from "./vision/pipeline.js";
 import { formatMetricsSummary, getMetrics } from "./vision/metrics.js";
 
@@ -100,7 +102,7 @@ async function searchPillList(itemName) {
   return Array.from(map.values());
 }
 
-/** Classification용 Top-K 후보 — 각인(mark) 필수. 색/모양만으로 조회하지 않음. */
+/** Vision Search candidate pool — imprint / name guided (never color-only). */
 async function fetchPillTopCandidates({ shape, color, mark, itemName, markCandidates } = {}, topK = 5) {
   const raw = [
     mark,
@@ -109,7 +111,6 @@ async function fetchPillTopCandidates({ shape, color, mark, itemName, markCandid
     .map((m) => String(m || "").toUpperCase().replace(/[^A-Z0-9]/g, ""))
     .filter((m) => m.length >= 2 && m.length <= 14);
 
-  // Also try shorter prefixes (OCR often appends junk)
   const expanded = [];
   for (const m of raw) {
     expanded.push(m);
@@ -118,7 +119,8 @@ async function fetchPillTopCandidates({ shape, color, mark, itemName, markCandid
   }
 
   const uniqueMarks = [...new Set(expanded)].slice(0, 6);
-  if (!uniqueMarks.length) return [];
+  const nameQ = String(itemName || "").trim();
+  if (!uniqueMarks.length && !nameQ) return [];
 
   const map = new Map();
 
@@ -157,6 +159,33 @@ async function fetchPillTopCandidates({ shape, color, mark, itemName, markCandid
   for (const m of uniqueMarks) {
     await pull({ print_front: m });
     if (color) await pull({ print_front: m, color_class1: color });
+  }
+  if (nameQ) {
+    await pull({ item_name: nameQ });
+    try {
+      const list = await searchPillList(nameQ);
+      for (const it of list) {
+        const id = String(it.itemSeq || it.id || "");
+        if (!id || map.has(id)) continue;
+        map.set(id, {
+          itemSeq: id,
+          name: it.name || "",
+          itemName: it.name || "",
+          entpName: it.entpName || "",
+          imageUrl: it.imageUrl || "",
+          tag: it.tag || "의약품",
+          mark: it.mark || "",
+          PRINT_FRONT: it.mark || "",
+          PRINT_BACK: "",
+          shape: it.shape || "",
+          DRUG_SHAPE: it.shape || "",
+          color: it.color || "",
+          COLOR_CLASS1: it.color || "",
+        });
+      }
+    } catch {
+      /* ignore */
+    }
   }
 
   return Array.from(map.values()).slice(0, Math.max(topK, 10));
@@ -597,6 +626,9 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   const [debugMode, setDebugMode] = useState(false);
   const [debugInfo, setDebugInfo] = useState(null);
   const [metricsSnap, setMetricsSnap] = useState(null);
+  const [dualMode, setDualMode] = useState(false); // front+back fusion
+  const [frontCrop, setFrontCrop] = useState(null);
+  const [captureSide, setCaptureSide] = useState("front"); // front | back
   const cancelledRef = useRef(false);
   const processingRef = useRef(false);
   const videoRef = useRef(null);
@@ -688,13 +720,14 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       maskUrl: debugMode && d.maskCanvas ? d.maskCanvas.toDataURL("image/png") : null,
     }));
 
-  const classifyFn = async (features) =>
+  const candidateFetcher = async (features) =>
     fetchPillTopCandidates({
       mark: features.mark,
       color: features.color,
       shape: features.shape,
       markCandidates: features.markCandidates,
-    }, 5);
+      itemName: features.itemName,
+    }, 10);
 
   const finalizePipelineResults = async (pipelineResult) => {
     processingRef.current = true;
@@ -702,7 +735,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
     // Only accept hits with imprint-matched best (blocks color-only false positives)
     const hits = (pipelineResult.results || []).filter(
-      (r) => r.best && r.mark && String(r.mark).length >= 2 && (r.best.ocrScore ?? 1) >= 0.25
+      (r) => r.best && (r.fusedConfidence ?? r.best.fusedScore ?? 0) >= 0.35
     );
     const marks = [...new Set(hits.map((r) => r.mark).filter(Boolean))];
     setDetectedMarks(marks);
@@ -857,6 +890,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     setDebugInfo(null);
     setErrorMsg("");
     setManualMark("");
+    setFrontCrop(null);
+    setCaptureSide("front");
     processingRef.current = false;
     setStatus("scanning");
     await openCamera();
@@ -909,15 +944,35 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       }
 
       try {
-        const pipelineResult = await recognizePillsPipeline(frame, {
-          classifyFn,
+        let pipelineResult = await runVisionSearch(frame, {
+          candidateFetcher,
+          bagHints: getSessionBagHints(),
+          frontBack: null,
           debug: debugMode,
           maxInstances: 6,
           shareByEmbedding: true,
           scales: [640, 960],
           minConfidenceKeep: 0.2,
           twoPass: true,
+          topK: 10,
         });
+
+        // Dual-side fusion: once front is saved, re-run with front+back crops
+        if (dualMode && frontCrop && pipelineResult.results?.[0]?.cropCanvas) {
+          pipelineResult = await runVisionSearch(frame, {
+            candidateFetcher,
+            bagHints: getSessionBagHints(),
+            frontBack: {
+              frontCanvas: frontCrop,
+              backCanvas: pipelineResult.results[0].cropCanvas,
+            },
+            debug: debugMode,
+            maxInstances: 1,
+            shareByEmbedding: false,
+            scales: [640, 960],
+            topK: 10,
+          });
+        }
         if (stopped || cancelledRef.current || processingRef.current) return;
 
         const dets = pipelineResult.results || [];
@@ -929,11 +984,23 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
         const withMark = dets.filter((d) => d.mark && d.mark.length >= 2);
         const withBest = dets.filter(
-          (d) => d.best && d.mark && (d.best.ocrScore ?? 0) >= 0.25
+          (d) => d.best && (d.fusedConfidence ?? d.best.fusedScore ?? 0) >= 0.35
         );
 
         if (withMark.length) {
           setDetectedMarks([...new Set(withMark.map((d) => d.mark))]);
+        }
+
+        // Dual-side: stash front crop once, then search with front+back fusion
+        if (dualMode && !frontCrop && dets[0]?.cropCanvas) {
+          const c = document.createElement("canvas");
+          c.width = dets[0].cropCanvas.width;
+          c.height = dets[0].cropCanvas.height;
+          c.getContext("2d").drawImage(dets[0].cropCanvas, 0, 0);
+          setFrontCrop(c);
+          setCaptureSide("back");
+          timerId = setTimeout(tick, 400);
+          return;
         }
 
         if (!withMark.length && !withBest.length) {
@@ -999,7 +1066,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       stopped = true;
       if (timerId) clearTimeout(timerId);
     };
-  }, [cameraError, resumeKey, debugMode]);
+  }, [cameraError, resumeKey, debugMode, dualMode, frontCrop]);
 
   const statusText = {
     scanning: "알약을 인식하고 있어요",
@@ -1062,6 +1129,20 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           <ChevronLeft size={28} color="#fff" />
         </button>
         <p className="text-[18px] font-bold text-white flex-1">알약 촬영</p>
+        <button
+          onClick={() => {
+            setDualMode((v) => !v);
+            setFrontCrop(null);
+            setCaptureSide("front");
+          }}
+          className="min-h-[32px] px-3 rounded-full text-[12px] font-bold mr-2"
+          style={{
+            backgroundColor: dualMode ? "#60A5FA" : "rgba(255,255,255,0.2)",
+            color: dualMode ? "#0C4A6E" : "#fff",
+          }}
+        >
+          {dualMode ? (captureSide === "back" ? "뒷면" : "앞면+") : "단면"}
+        </button>
         <button
           onClick={() => setDebugMode((v) => !v)}
           className="min-h-[32px] px-3 rounded-full text-[12px] font-bold"
@@ -1159,7 +1240,11 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             )}
             {status === "scanning" && (
               <p className="text-[12px] mt-2 leading-relaxed" style={{ color: GRAY2 }}>
-                알약 글자(각인)가 선명하게 보이도록 가까이 맞춰 주세요
+                {dualMode
+                  ? captureSide === "back"
+                    ? "앞면을 저장했습니다. 이제 뒷면 각인을 맞춰 주세요"
+                    : "앞면+뒷면 모드: 먼저 앞면 각인을 맞춰 주세요"
+                  : "Vision Search: 알약 글자(각인)가 선명하게 보이도록 가까이 맞춰 주세요"}
               </p>
             )}
           </div>
@@ -1380,9 +1465,8 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
 
   const processCapturedCanvas = async (canvas) => {
     setStatus("reading");
-    setMsg("문서 영역을 보정하고 글자를 읽고 있어요...");
+    setMsg("문서 보정 → OCR → 구조화 추출 중...");
     try {
-      // 문서검출 → 보정 → 향상 → OCR → Fuzzy Matching → API
       const docResult = await recognizeDocumentPipeline(canvas, {
         searchFn: async (name) => {
           const list = await searchPillList(name);
@@ -1395,8 +1479,14 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
         debug: false,
       });
 
-      const candidates = docResult.rawCandidates || [];
+      // Persist bag context for pill Vision Search cross-check
+      setSessionBagContext(docResult);
+
+      const candidates = docResult.drugNames || docResult.rawCandidates || [];
       const items = docResult.items || [];
+      const doseText = (docResult.doses || []).map((d) => d.raw || `${d.value}${d.unit}`).join(", ");
+      const freqText = (docResult.frequencies || []).map((f) => f.raw || `1일 ${f.perDay}회`).join(", ");
+      const timeText = (docResult.times || []).join(", ");
 
       if (!candidates.length && !items.length) {
         setStatus("error");
@@ -1404,9 +1494,16 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
         return;
       }
 
+      const summaryBits = [
+        candidates.length ? `약 ${candidates.length}개` : null,
+        doseText ? `용량 ${doseText}` : null,
+        freqText ? `횟수 ${freqText}` : null,
+        timeText ? `시간 ${timeText}` : null,
+      ].filter(Boolean);
+
       setFoundNames(candidates.length ? candidates : items.map((it) => it._matchedName || it.name || it.ITEM_NAME));
       setStatus("looking");
-      setMsg(`${Math.max(candidates.length, items.length)}개 약 이름을 찾았습니다. 정보를 조회해요...`);
+      setMsg(`${summaryBits.join(" · ")} 확인. 정보를 조회해요...`);
 
       let added = 0;
       const failed = [];
@@ -1438,8 +1535,8 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
               itemSeq: top.itemSeq,
               name: top.name,
               tag: top.tag || "의약품",
-              time: "처방 정보 확인",
-              timing: top.timing || "복용법 정보 없음",
+              time: timeText || "처방 정보 확인",
+              timing: top.timing || freqText || "복용법 정보 없음",
               effect: top.effect || top.tag || "정보 없음",
               caution: top.caution || "주의사항 정보 없음",
               durWarning: null,
@@ -1447,6 +1544,17 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
               entpName: top.entpName || "",
             }));
           }
+          // Attach structured bag fields onto schedule entry
+          detail = {
+            ...detail,
+            time: detail.time || timeText || "처방 정보 확인",
+            timing: [detail.timing, freqText, doseText].filter(Boolean).join(" · ") || detail.timing,
+            bagMeta: {
+              doses: docResult.doses || [],
+              frequencies: docResult.frequencies || [],
+              times: docResult.times || [],
+            },
+          };
           addToSchedule(detail);
           added += 1;
         } catch {
@@ -1470,7 +1578,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
       setMsg(
         failed.length
           ? `${added}개 약을 복용 관리에 추가했습니다. (일부 실패: ${failed.join(", ")})`
-          : `${added}개 약을 복용 관리에 추가했습니다.`
+          : `${added}개 약을 복용 관리에 추가했습니다.${timeText ? ` · ${timeText}` : ""}`
       );
     } catch (err) {
       console.error(err);
