@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { Home, Search, Camera, Clock, ChevronLeft, ChevronRight, Volume2, Check } from "lucide-react";
+import { Home, Search, Camera, Clock, ChevronLeft, ChevronRight, Volume2, Check, FileText } from "lucide-react";
 import Tesseract from "tesseract.js";
 
 // ---- Design tokens (reference images) ----
@@ -1074,7 +1074,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       }
 
       totalTries += 1;
-      if (totalTries > 18) {
+      if (totalTries > 12) {
         fail("알약 인식에 실패했습니다. 밝은 곳에서 다시 시도하거나 표기를 직접 입력해주세요.");
         return;
       }
@@ -1087,7 +1087,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           emptyTries += 1;
           lastKey = "";
           confirmCount = 0;
-          if (emptyTries >= 10) {
+          if (emptyTries >= 6) {
             fail("알약을 찾지 못했습니다. 약봉지를 펼쳐 알약이 보이게 한 뒤 다시 시도해주세요.");
             return;
           }
@@ -1363,9 +1363,142 @@ function Section({ title, children }) {
   );
 }
 
-function ManagementScreen({ setScreen, schedule }) {
+
+// 처방전/약봉지 OCR 텍스트에서 약 이름 후보 추출
+function extractDrugNameCandidates(ocrText) {
+  const text = String(ocrText || "");
+  const found = [];
+  const seen = new Set();
+
+  const push = (name) => {
+    const n = String(name || "").replace(/\s+/g, "").trim();
+    if (!n || n.length < 2 || n.length > 40) return;
+    const key = n.toUpperCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push(n);
+  };
+
+  const formRe =
+    /([가-힣A-Za-z][가-힣A-Za-z0-9]{0,24}(?:정|캡슐|연질캡슐|서방정|필름코팅정|시럽|산|액|주|겔|연고|크림|패치|좌제|환))/g;
+  let m;
+  while ((m = formRe.exec(text)) !== null) push(m[1]);
+
+  const doseRe = /([가-힣A-Za-z][가-힣A-Za-z0-9]{1,20})\s*(\d+)\s*(mg|MG|밀리그람|밀리그램)/g;
+  while ((m = doseRe.exec(text)) !== null) {
+    push(m[1]);
+    push(`${m[1]}${m[2]}mg`);
+  }
+
+  const engRe = /\b([A-Z][A-Z0-9-]{2,16})\b/g;
+  const skip = new Set(["THE", "AND", "FOR", "TAB", "CAP", "MG", "ML", "DOS", "DAY", "TAKE", "WITH"]);
+  while ((m = engRe.exec(text.toUpperCase())) !== null) {
+    if (!skip.has(m[1])) push(m[1]);
+  }
+
+  return found.slice(0, 8);
+}
+
+function ManagementScreen({ setScreen, schedule, addToSchedule }) {
   const [takenIds, setTakenIds] = useState([]);
-  const toggleTaken = (id) => setTakenIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+  const [status, setStatus] = useState("idle"); // idle | reading | looking | done | error
+  const [msg, setMsg] = useState("");
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [foundNames, setFoundNames] = useState([]);
+  const fileRef = useRef(null);
+
+  const toggleTaken = (id) => setTakenIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const resetScan = () => {
+    setStatus("idle");
+    setMsg("");
+    setFoundNames([]);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl("");
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const processImageFile = async (file) => {
+    if (!file) return;
+    setStatus("idle");
+    setMsg("");
+    setFoundNames([]);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+    setStatus("reading");
+    setMsg("처방전/약봉지 글자를 읽고 있어요...");
+
+    try {
+      const result = await Tesseract.recognize(file, "kor+eng", {});
+      const text = result?.data?.text || "";
+      const candidates = extractDrugNameCandidates(text);
+
+      if (!candidates.length) {
+        setStatus("error");
+        setMsg("약 이름을 읽지 못했습니다. 글자가 선명하게 나오게 다시 촬영해주세요.");
+        return;
+      }
+
+      setFoundNames(candidates);
+      setStatus("looking");
+      setMsg(`${candidates.length}개 약 이름을 찾았습니다. 정보를 조회해요...`);
+
+      let added = 0;
+      const failed = [];
+
+      for (const name of candidates) {
+        try {
+          const list = await searchPillList(name);
+          const top = list[0];
+          if (!top) {
+            failed.push(name);
+            continue;
+          }
+          const detail = await fetchPillDetailBySeq(top.itemSeq, top.name, schedule).catch(() => ({
+            id: top.itemSeq,
+            itemSeq: top.itemSeq,
+            name: top.name,
+            tag: top.tag || "의약품",
+            time: "처방 정보 확인",
+            timing: top.timing || "복용법 정보 없음",
+            effect: top.effect || top.tag || "정보 없음",
+            caution: top.caution || "주의사항 정보 없음",
+            durWarning: null,
+            imageUrl: top.imageUrl || "",
+            entpName: top.entpName || "",
+          }));
+          addToSchedule(detail);
+          added += 1;
+        } catch {
+          failed.push(name);
+        }
+      }
+
+      if (added === 0) {
+        setStatus("error");
+        setMsg("약은 읽었지만 공공 API에서 정보를 찾지 못했습니다. 약 찾기로 직접 검색해보세요.");
+        return;
+      }
+
+      setStatus("done");
+      setMsg(
+        failed.length
+          ? `${added}개 약을 복용 관리에 추가했습니다. (일부 실패: ${failed.join(", ")})`
+          : `${added}개 약을 복용 관리에 추가했습니다.`
+      );
+    } catch (err) {
+      console.error(err);
+      setStatus("error");
+      setMsg("이미지 인식에 실패했습니다. 다시 촬영해주세요.");
+    }
+  };
+
+  const onPickFile = (e) => {
+    const file = e.target.files?.[0];
+    if (file) processImageFile(file);
+  };
 
   return (
     <div className="flex flex-col h-full overflow-y-auto pb-24" style={{ backgroundColor: BG }}>
@@ -1373,13 +1506,78 @@ function ManagementScreen({ setScreen, schedule }) {
         <p className="text-[22px] font-extrabold text-center" style={{ color: BLACK }}>복용 관리</p>
       </div>
 
+      <div className="px-4 pt-4">
+        <Card className="p-4">
+          <p className="text-[16px] font-extrabold" style={{ color: BLACK }}>처방전 · 약봉지 등록</p>
+          <p className="text-[13px] mt-1 leading-relaxed" style={{ color: GRAY2 }}>
+            처방전이나 약봉지를 촬영하면 약 이름을 읽어 복용 관리에 추가합니다.
+          </p>
+
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            className="hidden"
+            onChange={onPickFile}
+          />
+
+          <button
+            onClick={() => fileRef.current?.click()}
+            disabled={status === "reading" || status === "looking"}
+            className="w-full min-h-[48px] rounded-full font-bold text-[16px] mt-3 flex items-center justify-center gap-2 disabled:opacity-50"
+            style={{ backgroundColor: RED, color: "#fff" }}
+          >
+            <FileText size={18} />
+            {status === "reading" || status === "looking" ? "인식 중..." : "처방전 / 약봉지 촬영"}
+          </button>
+
+          {previewUrl && (
+            <div className="mt-3 w-full h-[120px] rounded-xl overflow-hidden" style={{ backgroundColor: "#F9FAFB" }}>
+              <img src={previewUrl} alt="촬영 미리보기" className="w-full h-full object-contain" />
+            </div>
+          )}
+
+          {msg && (
+            <p
+              className="text-[13px] font-bold mt-3 text-center leading-relaxed"
+              style={{ color: status === "error" ? RED : status === "done" ? GREEN : GRAY2 }}
+            >
+              {msg}
+            </p>
+          )}
+
+          {foundNames.length > 0 && (status === "looking" || status === "done" || status === "error") && (
+            <p className="text-[12px] mt-2 text-center" style={{ color: GRAY }}>
+              인식된 이름: {foundNames.join(", ")}
+            </p>
+          )}
+
+          {(status === "done" || status === "error") && (
+            <button
+              onClick={resetScan}
+              className="w-full min-h-[40px] rounded-full font-bold text-[14px] mt-2"
+              style={{ backgroundColor: BLACK, color: "#fff" }}
+            >
+              다시 촬영하기
+            </button>
+          )}
+        </Card>
+      </div>
+
       {schedule.length === 0 ? (
         <div className="px-4 pt-8 flex flex-col items-center gap-3">
-          <span className="text-[48px]">💊</span>
-          <p className="text-[15px] text-center" style={{ color: GRAY }}>등록된 약이 없습니다.<br />촬영 또는 검색으로 약을 등록해보세요.</p>
+          <p className="text-[15px] text-center" style={{ color: GRAY }}>
+            등록된 약이 없습니다.
+            <br />
+            위 버튼으로 처방전/약봉지를 등록해보세요.
+          </p>
         </div>
       ) : (
         <div className="px-4 pt-4 flex flex-col gap-3">
+          <p className="text-[14px] font-bold" style={{ color: GRAY2 }}>
+            등록된 약 {schedule.length}개
+          </p>
           {schedule.map((p) => {
             const taken = takenIds.includes(p.id);
             return (
@@ -1405,7 +1603,7 @@ function ManagementScreen({ setScreen, schedule }) {
                       color: taken ? GREEN : RED,
                     }}
                   >
-                    {taken ? <><Check size={14} /> 복용완료</> : "복용 체크"}
+                    {taken ? (<><Check size={14} /> 복용완료</>) : "복용 체크"}
                   </button>
                 </div>
               </Card>
@@ -1437,7 +1635,9 @@ export default function App() {
         {screen === "search" && <SearchScreen setScreen={setScreen} setActivePill={setActivePill} setDetailSource={setDetailSource} schedule={schedule} />}
         {screen === "scan" && <ScanScreen setScreen={setScreen} setActivePill={setActivePill} setDetailSource={setDetailSource} schedule={schedule} />}
         {screen === "detail" && <DetailScreen setScreen={setScreen} pill={activePill} addToSchedule={addToSchedule} detailSource={detailSource} />}
-        {screen === "management" && <ManagementScreen setScreen={setScreen} schedule={schedule} />}
+        {screen === "management" && (
+          <ManagementScreen setScreen={setScreen} schedule={schedule} addToSchedule={addToSchedule} />
+        )}
         {screen !== "scan" && <BottomNav screen={screen} setScreen={setScreen} />}
       </div>
     </div>
