@@ -1,6 +1,6 @@
 const ENDPOINTS = {
   PILL_IDENTIFICATION:
-    "https://apis.data.go.kr/1471000/MdcinGrnIdntfcInfoService02/getMdcinGrnIdntfcInfoList02",
+    "https://apis.data.go.kr/1471000/MdcinGrnIdntfcInfoService03/getMdcinGrnIdntfcInfoList03",
   DRUG_EFFICACY: "https://apis.data.go.kr/B551182/msupCmpnMcareInfoService/getMsupCmpnMcareInq",
   DUR_INFO: "https://apis.data.go.kr/1471000/DURPrdlstInfoService03/getUsjntTabooInfoList03",
   EASY_DRUG_INFO: "https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList",
@@ -41,8 +41,6 @@ exports.handler = async function handler(event) {
     const baseUrl = ENDPOINTS[action];
     const params = { ...qs };
     delete params.action;
-
-    // data.go.kr가 요구하는 serviceKey를 서버에서만 붙입니다.
     params.serviceKey = apiKey;
 
     const query = new URLSearchParams(params).toString();
@@ -51,7 +49,6 @@ exports.handler = async function handler(event) {
     const res = await fetch(url);
     const bodyText = await res.text();
 
-    // API가 XML/JSON 등으로 내려올 수 있으니 최대한 안전하게 처리
     let parsed;
     try {
       parsed = JSON.parse(bodyText);
@@ -65,4 +62,3 @@ exports.handler = async function handler(event) {
     return jsonResponse(500, { error: "Proxy failed" });
   }
 };
-
