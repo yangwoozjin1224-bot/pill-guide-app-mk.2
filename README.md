@@ -21,6 +21,13 @@ cp .env.example .env
 
 키를 넣지 않으면 데모용 샘플 데이터로 동작합니다.
 
+### Netlify 배포 시 (CORS 우회 프록시 사용)
+`netlify/functions/data-go-proxy.js`는 브라우저에서 data.go.kr 호출 시 CORS로 막히는 문제를 피하기 위해 프록시를 제공합니다.  
+이 프록시는 Netlify 환경변수로 `DATA_GO_API_KEY`가 필요합니다.
+
+- Netlify UI → Site settings → Environment variables
+  - `DATA_GO_API_KEY` = 발급받은 서비스 키
+
 ## Netlify에 배포하기
 
 ### 방법 A. 폴더 그대로 드래그 앤 드롭 (가장 간단)

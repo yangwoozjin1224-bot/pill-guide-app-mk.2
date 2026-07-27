@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { Home, Search, Camera, Clock, ChevronLeft, ChevronRight, Volume2, AlarmClock, FileText, Check } from "lucide-react";
+import Tesseract from "tesseract.js";
 
 // ---- Design tokens (from spec) ----
 // bg: #FFFFFF | primary/header: #002B49 | text: #000000 | accent: #FFD700
@@ -22,7 +23,7 @@ const API_KEY =
   (typeof process !== "undefined" && process.env && process.env.REACT_APP_API_KEY) ||
   "YOUR_SERVICE_KEY";
 
-const IS_DEMO_KEY = !API_KEY || API_KEY === "YOUR_SERVICE_KEY";
+const HAS_API_KEY = !!API_KEY && API_KEY !== "YOUR_SERVICE_KEY";
 
 const API_ENDPOINTS = {
   // 1. 식품의약품안전처 - 의약품 낱알식별 정보 API
@@ -39,10 +40,37 @@ const API_ENDPOINTS = {
     "https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList",
 };
 
+const DATA_GO_PROXY_URL = "/api/data-go-proxy";
+
+async function dataGoFetchJson(action, query) {
+  const qs = new URLSearchParams(query);
+  const proxyUrl = `${DATA_GO_PROXY_URL}?action=${encodeURIComponent(action)}&${qs.toString()}`;
+
+  try {
+    const proxyRes = await fetch(proxyUrl);
+    if (proxyRes.ok) return await proxyRes.json();
+  } catch (e) {
+    // 로컬 개발 환경에서는 프록시가 없을 수 있으므로 조용히 통과
+  }
+
+  if (!HAS_API_KEY) {
+    throw new Error(
+      "공공데이터 API 서비스 키가 설정되어 있지 않습니다. .env에 VITE_API_KEY(또는 REACT_APP_API_KEY)를 넣어주세요."
+    );
+  }
+
+  const baseUrl = API_ENDPOINTS[action];
+  if (!baseUrl) throw new Error(`Unknown API action: ${action}`);
+
+  const directQuery = new URLSearchParams({ ...query, serviceKey: API_KEY });
+  const res = await fetch(`${baseUrl}?${directQuery.toString()}`);
+  if (!res.ok) throw new Error("공공 API 호출 실패");
+  return await res.json();
+}
+
 // ---- 1) 의약품 낱알식별 정보 API : 모양/색상/식별문자 또는 이름으로 품목 특정 ----
 async function fetchPillIdentification({ shape, color, mark, itemName } = {}) {
   const query = new URLSearchParams({
-    serviceKey: API_KEY,
     type: "json",
     numOfRows: "1",
     pageNo: "1",
@@ -52,9 +80,7 @@ async function fetchPillIdentification({ shape, color, mark, itemName } = {}) {
     ...(shape ? { drug_shape: shape } : {}),
   });
 
-  const res = await fetch(`${API_ENDPOINTS.PILL_IDENTIFICATION}?${query.toString()}`);
-  if (!res.ok) throw new Error("낱알식별 정보 API 호출 실패");
-  const json = await res.json();
+  const json = await dataGoFetchJson("PILL_IDENTIFICATION", Object.fromEntries(query.entries()));
   const item = json?.body?.items?.[0];
   if (!item) throw new Error("일치하는 알약 정보를 찾을 수 없습니다");
 
@@ -69,10 +95,8 @@ async function fetchPillIdentification({ shape, color, mark, itemName } = {}) {
 
 // ---- 2) 의약품성분약효정보조회서비스 API : 품목기준코드 -> 약효 분류명 ----
 async function fetchDrugEfficacy(itemSeq) {
-  const query = new URLSearchParams({ serviceKey: API_KEY, type: "json", itemSeq });
-  const res = await fetch(`${API_ENDPOINTS.DRUG_EFFICACY}?${query.toString()}`);
-  if (!res.ok) throw new Error("약효분류 정보 API 호출 실패");
-  const json = await res.json();
+  const query = new URLSearchParams({ type: "json", itemSeq });
+  const json = await dataGoFetchJson("DRUG_EFFICACY", Object.fromEntries(query.entries()));
   const item = json?.body?.items?.[0];
   return { efficacyTag: item?.CLASS_NAME || item?.EE_DOC_DATA || "분류 정보 없음" };
 }
@@ -82,14 +106,11 @@ async function fetchDurWarning(itemSeq, currentItemSeqs = []) {
   if (!currentItemSeqs.length) return { hasWarning: false, message: "" };
 
   const query = new URLSearchParams({
-    serviceKey: API_KEY,
     type: "json",
     itemSeq,
     itemSeqs: currentItemSeqs.join(","),
   });
-  const res = await fetch(`${API_ENDPOINTS.DUR_INFO}?${query.toString()}`);
-  if (!res.ok) throw new Error("DUR 정보 API 호출 실패");
-  const json = await res.json();
+  const json = await dataGoFetchJson("DUR_INFO", Object.fromEntries(query.entries()));
   const items = json?.body?.items || [];
   if (!items.length) return { hasWarning: false, message: "" };
 
@@ -106,10 +127,8 @@ async function fetchDurWarning(itemSeq, currentItemSeqs = []) {
 
 // ---- 4) 의약품 개요정보(e약은요) API : 어르신용 쉬운 복용법/주의사항 텍스트 ----
 async function fetchEasyDrugInfo(itemSeq) {
-  const query = new URLSearchParams({ serviceKey: API_KEY, type: "json", itemSeq });
-  const res = await fetch(`${API_ENDPOINTS.EASY_DRUG_INFO}?${query.toString()}`);
-  if (!res.ok) throw new Error("e약은요 정보 API 호출 실패");
-  const json = await res.json();
+  const query = new URLSearchParams({ type: "json", itemSeq });
+  const json = await dataGoFetchJson("EASY_DRUG_INFO", Object.fromEntries(query.entries()));
   const item = json?.body?.items?.[0];
   return {
     usageText: item?.USE_METHOD_EASY || item?.USE_METHOD_QESITM || "복용법 정보 없음",
@@ -117,22 +136,13 @@ async function fetchEasyDrugInfo(itemSeq) {
   };
 }
 
-// ---- 데모 대체 데이터 (서비스 키 미설정 시 또는 API 호출 실패 시 사용) ----
-function findFallbackPill({ itemName } = {}) {
-  const match =
-    (itemName && MOCK_PILLS.find((p) => p.name.includes(itemName))) || MOCK_PILLS[0];
-  return match ? { ...match, itemSeq: match.id, durWarning: null } : null;
-}
-
 // ---- 파이프라인: 4개 API를 순차/병렬로 호출해 하나의 알약 데이터 객체로 병합 ----
 // 1) 낱알식별 API로 itemSeq를 먼저 확보(선행 필요) → 2~4) 나머지 3개는 병렬 호출
 async function fetchPillData(params = {}, currentSchedule = []) {
-  if (IS_DEMO_KEY) {
-    // 서비스 키가 아직 발급/설정되지 않은 상태 → 데모 데이터로 응답 (실 서비스에서는 제거)
-    await new Promise((r) => setTimeout(r, 600));
-    const fallback = findFallbackPill(params);
-    if (!fallback) throw new Error("알약 정보를 찾을 수 없습니다");
-    return fallback;
+  if (!HAS_API_KEY) {
+    throw new Error(
+      "공공데이터 API 서비스 키가 설정되어 있지 않습니다. .env에 VITE_API_KEY(또는 REACT_APP_API_KEY)를 넣어주세요."
+    );
   }
 
   try {
@@ -163,9 +173,7 @@ async function fetchPillData(params = {}, currentSchedule = []) {
     };
   } catch (err) {
     console.error("[fetchPillData] 공공 API 호출 실패:", err);
-    const fallback = findFallbackPill(params);
-    if (!fallback) throw new Error("알약 정보를 찾을 수 없습니다");
-    return fallback;
+    throw err;
   }
 }
 
@@ -477,6 +485,8 @@ function ScanScreen({ setScreen, setActivePill, schedule }) {
   const [cameraError, setCameraError] = useState("");
   const [cameraReady, setCameraReady] = useState(false);
   const [requestingCamera, setRequestingCamera] = useState(false);
+  const [manualMark, setManualMark] = useState("");
+  const cancelledRef = useRef(false);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
 
@@ -543,34 +553,106 @@ function ScanScreen({ setScreen, setActivePill, schedule }) {
     };
   }, []);
 
-  const runDetection = () => {
+  const captureFrame = () => {
+    const video = videoRef.current;
+    if (!video) return null;
+
+    const vw = video.videoWidth || 0;
+    const vh = video.videoHeight || 0;
+    if (!vw || !vh) return null;
+
+    // OCR 속도를 위해 다운스케일
+    const targetW = 640;
+    const scale = vw > targetW ? targetW / vw : 1;
+    const w = Math.max(1, Math.floor(vw * scale));
+    const h = Math.max(1, Math.floor(vh * scale));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    // OCR 정확도 향상을 위한 간단한 전처리 (그레이스케일 + 대비)
+    ctx.filter = "grayscale(1) contrast(1.7)";
+    ctx.drawImage(video, 0, 0, w, h);
+    ctx.filter = "none";
+
+    return canvas.toDataURL("image/jpeg", 0.85);
+  };
+
+  const extractMarkWithOcr = async (imageDataUrl) => {
+    const result = await Tesseract.recognize(imageDataUrl, "eng", {
+      // 숫자/영문이 주로 적혀있는 알약 표기 특성 반영
+      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    });
+
+    const text = (result?.data?.text || "").toUpperCase();
+    // 노이즈 제거: 3자 이상 영문/숫자 뭉치만 후보로 사용
+    const candidates = text.match(/[A-Z0-9]{3,}/g) || [];
+    if (!candidates.length) return null;
+
+    // 길이가 가장 긴 후보를 우선
+    candidates.sort((a, b) => b.length - a.length);
+    return candidates[0].trim();
+  };
+
+  const runDetection = async ({ overrideMark = "" } = {}) => {
+    cancelledRef.current = false;
     setErrorMsg("");
-    setStatus("scanning");
-    const t1 = setTimeout(() => setStatus("found"), 2600);
-    const t2 = setTimeout(async () => {
-      setStatus("loading");
+
+    // 1) 수동 입력이 있으면 OCR 없이 바로 API 호출
+    const manual = overrideMark ? String(overrideMark).trim() : "";
+    if (manual) {
       try {
-        // 카메라 인식 결과(모양/색상/식별문자)를 4개 공공 API 파이프라인으로 전달
-        const data = await fetchPillData(
-          { shape: "원형", color: "하양", mark: "TYLENOL" },
-          schedule
-        );
-        setActivePill(data);
+        setStatus("loading");
+        setActivePill(await fetchPillData({ mark: manual }, schedule));
         setScreen("detail");
       } catch (err) {
         setStatus("error");
         setErrorMsg(err.message || "알약 정보를 찾을 수 없습니다");
       }
-    }, 3600);
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-    };
+      return;
+    }
+
+    // 2) 카메라 프레임 → OCR → mark 추출 → 4개 API 파이프라인
+    try {
+      setStatus("scanning");
+      const frame = captureFrame();
+      if (!frame) throw new Error("카메라 영상이 아직 준비되지 않았어요. 잠시 후 다시 시도해주세요.");
+
+      setStatus("ocr");
+      const mark = await extractMarkWithOcr(frame);
+      if (cancelledRef.current) return;
+
+      if (!mark) {
+        setStatus("error");
+        setErrorMsg("알약 표기(문자)를 읽지 못했어요. 아래에 직접 표기를 입력해보세요.");
+        return;
+      }
+
+      setStatus("found");
+      setStatus("loading");
+
+      const data = await fetchPillData({ mark }, schedule);
+      if (cancelledRef.current) return;
+
+      setActivePill(data);
+      setScreen("detail");
+    } catch (err) {
+      if (cancelledRef.current) return;
+      setStatus("error");
+      setErrorMsg(err.message || "알약 정보를 찾을 수 없습니다");
+    }
   };
 
   useEffect(() => {
-    const cleanup = runDetection();
-    return cleanup;
+    cancelledRef.current = false;
+    runDetection();
+    return () => {
+      cancelledRef.current = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -620,7 +702,7 @@ function ScanScreen({ setScreen, setActivePill, schedule }) {
           {(status === "found" || status === "loading" || status === "error") && (
             <span className="text-[70px]">{status === "error" ? "⚠️" : "✅"}</span>
           )}
-          {status === "scanning" && (
+          {(status === "scanning" || status === "ocr") && (
             <div
               className="absolute left-2 right-2 h-[3px] rounded"
               style={{ backgroundColor: YELLOW, animation: "scanline 1.4s linear infinite" }}
@@ -638,8 +720,9 @@ function ScanScreen({ setScreen, setActivePill, schedule }) {
               color: "#fff",
             }}
           >
-            {status === "scanning" && "🔍 실시간으로 알약을 인식하고 있어요..."}
+            {status === "scanning" && "🔍 촬영 프레임을 준비하고 있어요..."}
             {status === "found" && "✅ 알약을 인식했어요!"}
+            {status === "ocr" && "🔍 알약 표기(문자)를 읽고 있어요..."}
             {status === "loading" && "⏳ 알약 정보를 불러오고 있어요..."}
           </div>
         ) : (
@@ -650,8 +733,27 @@ function ScanScreen({ setScreen, setActivePill, schedule }) {
             >
               ⚠️ {errorMsg}
             </div>
+            <div
+              className="w-full min-h-[64px] rounded-2xl border-2 flex items-center px-4 gap-3"
+              style={{ borderColor: "#E5E7EB", backgroundColor: "#FFFFFF" }}
+            >
+              <span className="text-[18px]">⌨️</span>
+              <input
+                value={manualMark}
+                onChange={(e) => setManualMark(e.target.value)}
+                placeholder="알약 표기(예: TYLENOL)"
+                className="flex-1 text-[18px] outline-none bg-transparent"
+              />
+            </div>
             <BigButton bg={YELLOW} color={NAVY} onClick={runDetection}>
               다시 촬영하기
+            </BigButton>
+            <BigButton
+              bg={NAVY}
+              color={YELLOW}
+              onClick={() => runDetection({ overrideMark: manualMark })}
+            >
+              입력으로 검색
             </BigButton>
           </div>
         )}
