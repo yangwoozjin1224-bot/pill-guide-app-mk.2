@@ -1,11 +1,10 @@
 import { useState, useEffect, useRef } from "react";
-import { Home, Search, Camera, Clock, ChevronLeft, ChevronRight, Volume2, Plus, Check } from "lucide-react";
+import { Home, Search, Camera, Clock, ChevronLeft, ChevronRight, Volume2, Check } from "lucide-react";
 import Tesseract from "tesseract.js";
 
 // ---- Design tokens (reference images) ----
 const RED = "#E53E3E";
 const RED_LIGHT = "#FFF5F5";
-const PURPLE = "#7C3AED";
 const BG = "#F5F5F7";
 const CARD = "#FFFFFF";
 const BLACK = "#1A1A1A";
@@ -236,34 +235,31 @@ function BottomNav({ screen, setScreen }) {
   const items = [
     { key: "home", icon: Home, label: "홈" },
     { key: "search", icon: Search, label: "약 찾기" },
-    { key: "scan", icon: Camera, label: "", center: true },
+    { key: "scan", icon: Camera, label: "촬영" },
     { key: "management", icon: Clock, label: "복용관리" },
   ];
   return (
-    <div className="absolute bottom-0 left-0 right-0 bg-white border-t flex items-end justify-around pb-2 pt-1" style={{ borderColor: BORDER }}>
+    <div
+      className="absolute bottom-0 left-0 right-0 bg-white border-t flex items-center justify-around py-2"
+      style={{ borderColor: BORDER }}
+    >
       {items.map((it) => {
         const Icon = it.icon;
         const active = screen === it.key;
-        if (it.center) {
-          return (
-            <button
-              key={it.key}
-              onClick={() => setScreen(it.key)}
-              className="w-[56px] h-[56px] rounded-full flex items-center justify-center -mt-5 shadow-lg"
-              style={{ backgroundColor: PURPLE }}
-            >
-              <Plus size={28} color="#fff" strokeWidth={2.5} />
-            </button>
-          );
-        }
         return (
           <button
             key={it.key}
             onClick={() => setScreen(it.key)}
-            className="flex flex-col items-center gap-0.5 py-1 px-3"
+            className="flex flex-1 flex-col items-center justify-center gap-1 min-h-[56px] py-1"
           >
-            <Icon size={22} color={active ? RED : GRAY} strokeWidth={active ? 2.5 : 1.8} />
-            <span className="text-[11px] font-semibold" style={{ color: active ? RED : GRAY }}>{it.label}</span>
+            <Icon
+              size={24}
+              color={active ? BLACK : GRAY}
+              strokeWidth={active ? 2.6 : 1.8}
+            />
+            <span className="text-[11px] font-medium" style={{ color: GRAY }}>
+              {it.label}
+            </span>
           </button>
         );
       })}
@@ -484,29 +480,59 @@ function SearchScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 }
 
 function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
-  const [status, setStatus] = useState("idle");
+  const [status, setStatus] = useState("scanning"); // scanning | ocr | loading | found | error
   const [errorMsg, setErrorMsg] = useState("");
   const [cameraError, setCameraError] = useState("");
   const [manualMark, setManualMark] = useState("");
+  const [detectedMark, setDetectedMark] = useState("");
   const cancelledRef = useRef(false);
+  const ocrBusyRef = useRef(false);
+  const processingRef = useRef(false);
+  const lastMarkRef = useRef("");
+  const confirmCountRef = useRef(0);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
 
-  const stopCamera = () => { if (!streamRef.current) return; streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; };
+  const stopCamera = () => {
+    if (!streamRef.current) return;
+    streamRef.current.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  };
 
   const openCamera = async () => {
-    if (!navigator?.mediaDevices?.getUserMedia) { setCameraError("카메라를 지원하지 않는 브라우저입니다."); return; }
-    if (!window.isSecureContext) { setCameraError("HTTPS 또는 localhost에서만 카메라를 사용할 수 있습니다."); return; }
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      setCameraError("카메라를 지원하지 않는 브라우저입니다.");
+      return false;
+    }
+    if (!window.isSecureContext) {
+      setCameraError("HTTPS 또는 localhost에서만 카메라를 사용할 수 있습니다.");
+      return false;
+    }
     setCameraError("");
     stopCamera();
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
       streamRef.current = stream;
-      if (videoRef.current) { videoRef.current.srcObject = stream; try { await videoRef.current.play(); } catch {} }
-    } catch { setCameraError("카메라 권한을 허용해주세요."); }
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        try {
+          await videoRef.current.play();
+        } catch {}
+      }
+      return true;
+    } catch {
+      setCameraError("카메라 권한을 허용해주세요.");
+      return false;
+    }
   };
 
-  useEffect(() => { openCamera(); return () => stopCamera(); }, []);
+  useEffect(() => {
+    openCamera();
+    return () => stopCamera();
+  }, []);
 
   const captureFrame = () => {
     const video = videoRef.current;
@@ -515,7 +541,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     const w = Math.floor(video.videoWidth * scale);
     const h = Math.floor(video.videoHeight * scale);
     const canvas = document.createElement("canvas");
-    canvas.width = w; canvas.height = h;
+    canvas.width = w;
+    canvas.height = h;
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
     ctx.filter = "grayscale(1) contrast(1.7)";
@@ -524,7 +551,9 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   };
 
   const extractMarkWithOcr = async (imageDataUrl) => {
-    const result = await Tesseract.recognize(imageDataUrl, "eng", { tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" });
+    const result = await Tesseract.recognize(imageDataUrl, "eng", {
+      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    });
     const text = (result?.data?.text || "").toUpperCase();
     const candidates = text.match(/[A-Z0-9]{3,}/g) || [];
     if (!candidates.length) return null;
@@ -532,35 +561,99 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     return candidates[0].trim();
   };
 
-  const runDetection = async ({ overrideMark = "" } = {}) => {
-    cancelledRef.current = false;
-    setErrorMsg("");
-    const manual = String(overrideMark || "").trim();
-    if (manual) {
-      try {
-        setStatus("loading");
-        const data = await fetchPillData({ mark: manual, itemName: manual }, schedule);
-        if (cancelledRef.current) return;
-        setDetailSource("scan"); setActivePill(data); setScreen("detail");
-      } catch (err) { setStatus("error"); setErrorMsg(err.message || "알약을 찾을 수 없습니다"); }
-      return;
-    }
+  const lookupMark = async (mark) => {
+    processingRef.current = true;
+    setStatus("loading");
+    setDetectedMark(mark);
     try {
-      setStatus("scanning");
-      const frame = captureFrame();
-      if (!frame) throw new Error("카메라가 준비되지 않았습니다.");
-      setStatus("ocr");
-      const mark = await extractMarkWithOcr(frame);
-      if (cancelledRef.current) return;
-      if (!mark) { setStatus("error"); setErrorMsg("표기를 인식하지 못했습니다. 직접 입력해주세요."); return; }
-      setStatus("loading");
       const data = await fetchPillData({ mark, itemName: mark }, schedule);
       if (cancelledRef.current) return;
-      setDetailSource("scan"); setActivePill(data); setScreen("detail");
-    } catch (err) { if (!cancelledRef.current) { setStatus("error"); setErrorMsg(err.message || "알약을 찾을 수 없습니다"); } }
+      setStatus("found");
+      setDetailSource("scan");
+      setActivePill(data);
+      setScreen("detail");
+    } catch (err) {
+      if (cancelledRef.current) return;
+      setStatus("error");
+      setErrorMsg(err.message || "알약을 찾을 수 없습니다");
+      processingRef.current = false;
+      lastMarkRef.current = "";
+      confirmCountRef.current = 0;
+    }
   };
 
-  useEffect(() => () => { cancelledRef.current = true; }, []);
+  const runManualSearch = async () => {
+    const manual = String(manualMark || "").trim();
+    if (!manual) return;
+    setErrorMsg("");
+    await lookupMark(manual);
+  };
+
+  // 실시간 OCR 루프: 2.5초마다 프레임 분석, 동일 표기 2회 연속이면 API 조회
+  useEffect(() => {
+    if (cameraError) return;
+
+    cancelledRef.current = false;
+    processingRef.current = false;
+    lastMarkRef.current = "";
+    confirmCountRef.current = 0;
+    setStatus("scanning");
+
+    const intervalId = setInterval(async () => {
+      if (cancelledRef.current || processingRef.current || ocrBusyRef.current) return;
+
+      const frame = captureFrame();
+      if (!frame) return;
+
+      ocrBusyRef.current = true;
+      setStatus("ocr");
+      try {
+        const mark = await extractMarkWithOcr(frame);
+        if (cancelledRef.current || processingRef.current) return;
+
+        if (!mark) {
+          lastMarkRef.current = "";
+          confirmCountRef.current = 0;
+          setDetectedMark("");
+          setStatus("scanning");
+          return;
+        }
+
+        setDetectedMark(mark);
+        if (mark === lastMarkRef.current) {
+          confirmCountRef.current += 1;
+        } else {
+          lastMarkRef.current = mark;
+          confirmCountRef.current = 1;
+        }
+
+        if (confirmCountRef.current >= 2) {
+          clearInterval(intervalId);
+          await lookupMark(mark);
+          return;
+        }
+
+        setStatus("scanning");
+      } catch {
+        if (!cancelledRef.current && !processingRef.current) setStatus("scanning");
+      } finally {
+        ocrBusyRef.current = false;
+      }
+    }, 2500);
+
+    return () => {
+      cancelledRef.current = true;
+      clearInterval(intervalId);
+    };
+  }, [cameraError]);
+
+  const statusText = {
+    scanning: "실시간으로 알약을 인식하고 있어요...",
+    ocr: "알약 표기를 읽고 있어요...",
+    loading: "알약 정보를 불러오고 있어요...",
+    found: "알약을 인식했어요!",
+    error: errorMsg,
+  }[status];
 
   return (
     <div className="flex flex-col h-full" style={{ backgroundColor: "#000" }}>
@@ -576,49 +669,77 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         {cameraError ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 px-8" style={{ backgroundColor: BG }}>
             <p className="text-[15px] text-center leading-relaxed" style={{ color: BLACK }}>{cameraError}</p>
-            <button onClick={openCamera} className="min-h-[44px] px-5 rounded-full font-bold text-[15px]" style={{ backgroundColor: RED, color: "#fff" }}>다시 시도</button>
+            <button
+              onClick={openCamera}
+              className="min-h-[44px] px-5 rounded-full font-bold text-[15px]"
+              style={{ backgroundColor: RED, color: "#fff" }}
+            >
+              다시 시도
+            </button>
           </div>
         ) : (
-          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[220px] h-[220px] rounded-3xl" style={{ border: "3px solid rgba(255,255,255,0.7)", boxShadow: "0 0 0 9999px rgba(0,0,0,0.4)" }} />
+          <>
+            <div
+              className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[220px] h-[220px] rounded-3xl relative"
+              style={{
+                border: `3px solid ${status === "found" || status === "loading" ? "#34D399" : "rgba(255,255,255,0.75)"}`,
+                boxShadow: "0 0 0 9999px rgba(0,0,0,0.4)",
+              }}
+            >
+              {(status === "scanning" || status === "ocr") && (
+                <div
+                  className="absolute left-3 right-3 h-[2px] rounded"
+                  style={{ backgroundColor: "#fff", animation: "scanline 1.4s linear infinite" }}
+                />
+              )}
+            </div>
+          </>
         )}
       </div>
 
       <div className="px-5 py-4" style={{ backgroundColor: CARD }}>
-        {status === "error" && (
-          <div className="mb-3">
-            <p className="text-[14px] text-center mb-2" style={{ color: RED }}>{errorMsg}</p>
+        {status !== "error" ? (
+          <div className="text-center">
+            <p className="text-[15px] font-bold" style={{ color: BLACK }}>{statusText}</p>
+            {detectedMark && status !== "loading" && status !== "found" && (
+              <p className="text-[13px] mt-1" style={{ color: GRAY2 }}>
+                인식된 표기: {detectedMark}
+              </p>
+            )}
+          </div>
+        ) : (
+          <div>
+            <p className="text-[14px] text-center mb-3" style={{ color: RED }}>{errorMsg}</p>
             <Card className="w-full flex items-center px-3 py-2 gap-2 mb-2">
               <input
                 value={manualMark}
                 onChange={(e) => setManualMark(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") runManualSearch();
+                }}
                 placeholder="알약 표기 직접 입력"
                 className="flex-1 text-[15px] outline-none bg-transparent"
                 style={{ color: BLACK }}
               />
             </Card>
             <button
-              onClick={() => runDetection({ overrideMark: manualMark })}
-              className="w-full min-h-[48px] rounded-full font-bold text-[16px] mb-2"
-              style={{ backgroundColor: BLACK, color: "#fff" }}
+              onClick={runManualSearch}
+              className="w-full min-h-[48px] rounded-full font-bold text-[16px]"
+              style={{ backgroundColor: RED, color: "#fff" }}
             >
               입력으로 검색
             </button>
           </div>
         )}
-        {status !== "error" && status !== "idle" && (
-          <p className="text-[14px] text-center mb-2" style={{ color: GRAY2 }}>
-            {status === "scanning" ? "촬영 중..." : status === "ocr" ? "표기 인식 중..." : "약 정보 조회 중..."}
-          </p>
-        )}
-        <button
-          onClick={() => runDetection()}
-          disabled={status === "ocr" || status === "loading" || status === "scanning"}
-          className="w-full min-h-[52px] rounded-full font-bold text-[17px] disabled:opacity-50"
-          style={{ backgroundColor: RED, color: "#fff" }}
-        >
-          {status === "idle" || status === "error" ? "촬영하기" : "처리 중..."}
-        </button>
       </div>
+
+      <style>{`
+        @keyframes scanline {
+          0% { top: 12px; }
+          50% { top: 200px; }
+          100% { top: 12px; }
+        }
+      `}</style>
     </div>
   );
 }
