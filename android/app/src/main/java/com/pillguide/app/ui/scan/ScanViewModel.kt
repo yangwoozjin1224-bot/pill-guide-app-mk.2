@@ -153,6 +153,41 @@ class ScanViewModel @Inject constructor(
         }
     }
 
+    fun recognizeBitmap(raw: Bitmap) {
+        stopLoop()
+        viewModelScope.launch {
+            _state.update { it.copy(status = ScanStatus.Loading, error = null) }
+            runCatching {
+                pipeline.recognize(ImageUtils.centerCropSquare(raw, 960))
+            }.onSuccess { result ->
+                if (result.pills.isEmpty()) {
+                    _state.update {
+                        it.copy(
+                            status = ScanStatus.Error,
+                            boxes = result.boxes,
+                            marks = result.marks,
+                            error = "사진에서 약을 찾지 못했습니다.",
+                        )
+                    }
+                } else {
+                    haptics.tick()
+                    _state.update {
+                        it.copy(
+                            status = ScanStatus.Results,
+                            results = result.pills,
+                            boxes = result.boxes,
+                            marks = result.marks,
+                        )
+                    }
+                }
+            }.onFailure { e ->
+                _state.update {
+                    it.copy(status = ScanStatus.Error, error = e.message ?: "인식 실패")
+                }
+            }
+        }
+    }
+
     override fun onCleared() {
         stopLoop()
         super.onCleared()

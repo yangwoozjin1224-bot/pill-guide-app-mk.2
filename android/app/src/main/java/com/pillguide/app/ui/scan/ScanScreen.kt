@@ -66,6 +66,22 @@ fun ScanScreen(
     val state by vm.state.collectAsStateWithLifecycle()
     val cameraPermission = rememberPermissionState(android.Manifest.permission.CAMERA)
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
+    val context = LocalContext.current
+
+    val galleryLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val bmp = runCatching {
+            if (Build.VERSION.SDK_INT >= 28) {
+                ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri))
+            } else {
+                @Suppress("DEPRECATION")
+                MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
+            }
+        }.getOrNull() ?: return@rememberLauncherForActivityResult
+        vm.recognizeBitmap(bmp)
+    }
 
     LaunchedEffect(cameraPermission.status.isGranted) {
         if (cameraPermission.status.isGranted) {
@@ -126,6 +142,12 @@ fun ScanScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { galleryLauncher.launch("image/*") },
+                        modifier = Modifier,
+                    ) {
+                        Icon(Icons.Default.PhotoLibrary, contentDescription = "갤러리에서 사진 선택", tint = Color.White)
+                    }
                     IconButton(onClick = { vm.toggleTorch() }) {
                         Icon(
                             if (state.torch) Icons.Default.FlashOn else Icons.Default.FlashOff,
