@@ -10,3 +10,4 @@ export * from "./fuzzy.js";
 export * from "./document.js";
 export * from "./metrics.js";
 export * from "./pipeline.js";
+export * from "./augmentation.js";

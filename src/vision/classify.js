@@ -153,41 +153,96 @@ export async function extractImprintOcr(cropCanvas, worker, { thorough = false }
   }
 
   if (!ranked.length) return { mark: "", confidence: 0, all: [] };
+  const filtered = ranked.filter(([m]) => isValidImprintMark(m));
+  if (!filtered.length) return { mark: "", confidence: 0, all: [] };
+  // Require a minimum OCR vote score so random noise doesn't become a "mark"
+  if (filtered[0][1] < 55) return { mark: "", confidence: 0, all: filtered.slice(0, 5).map(([mark, score]) => ({ mark, score })) };
   return {
-    mark: ranked[0][0],
-    confidence: ranked[0][1],
-    all: ranked.slice(0, 5).map(([mark, score]) => ({ mark, score })),
+    mark: filtered[0][0],
+    confidence: filtered[0][1],
+    all: filtered.slice(0, 5).map(([mark, score]) => ({ mark, score })),
   };
+}
+
+/** Reject OCR garbage that used to match random API first-hits (e.g. 졸뎀속붕정). */
+export function isValidImprintMark(mark) {
+  const m = String(mark || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (m.length < 2 || m.length > 14) return false;
+  // Single repeated char / pure noise
+  if (/^(.)\1+$/.test(m)) return false;
+  // Very common false OCR tokens
+  const ban = new Set([
+    "II", "III", "OO", "O0", "0O", "OL", "IO", "OI", "TO", "OT",
+    "THE", "AND", "FOR", "TAB", "CAP", "MG", "ML", "DOS", "DAY",
+  ]);
+  if (ban.has(m)) return false;
+  return true;
+}
+
+function normalizeMark(s) {
+  return String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+/** How well OCR imprint matches DB PRINT_FRONT/BACK (0..1). */
+export function imprintMatchScore(ocrMark, candidate) {
+  const mark = normalizeMark(ocrMark);
+  if (!mark) return 0;
+  const front = normalizeMark(candidate.mark || candidate.PRINT_FRONT || "");
+  const back = normalizeMark(candidate.PRINT_BACK || "");
+  if (!front && !back) return 0;
+  if (front === mark || back === mark) return 1;
+  if ((front && (front.includes(mark) || mark.includes(front))) ||
+      (back && (back.includes(mark) || mark.includes(back)))) {
+    // Prefer longer overlap; short marks like "1" must not dominate
+    const ref = front.includes(mark) || mark.includes(front) ? front : back;
+    const overlap = Math.min(mark.length, ref.length) / Math.max(mark.length, ref.length);
+    return mark.length >= 3 ? 0.7 + 0.25 * overlap : 0.35 * overlap;
+  }
+  return 0;
 }
 
 /**
  * Re-rank Top-K API candidates with visual cues.
- * final = 0.45*apiRank + 0.2*color + 0.15*shape + 0.2*ocr
+ * Why strict OCR gate: color/shape-only queries return arbitrary first rows
+ * (often 졸뎀속붕정 for white/round). Never promote those without imprint match.
  */
 export function rerankCandidates(candidates, cues) {
   const { color, shape, mark } = cues;
+  const validMark = isValidImprintMark(mark) ? normalizeMark(mark) : "";
   const n = Math.max(candidates.length, 1);
 
-  return candidates
+  const ranked = candidates
     .map((c, idx) => {
       const apiScore = 1 - idx / n;
       const cColor = String(c.color || c.COLOR_CLASS1 || "");
       const cShape = String(c.shape || c.DRUG_SHAPE || "");
-      const cMark = String(c.mark || c.PRINT_FRONT || c.PRINT_BACK || "").toUpperCase();
+      const ocrScore = validMark ? imprintMatchScore(validMark, c) : 0;
 
-      const colorScore = color && cColor.includes(color) ? 1 : color && cColor ? 0.2 : 0.5;
-      const shapeScore = shape && cShape.includes(shape.replace("형", "")) ? 1 : shape && cShape ? 0.25 : 0.5;
-      let ocrScore = 0.4;
-      if (mark && cMark) {
-        if (cMark === mark) ocrScore = 1;
-        else if (cMark.includes(mark) || mark.includes(cMark)) ocrScore = 0.75;
-        else ocrScore = 0.1;
-      }
+      const colorScore = color && cColor.includes(color) ? 1 : color && cColor ? 0.15 : 0.4;
+      const shapeScore =
+        shape && cShape.includes(String(shape).replace("형", ""))
+          ? 1
+          : shape && cShape
+            ? 0.2
+            : 0.4;
 
-      const score = 0.45 * apiScore + 0.2 * colorScore + 0.15 * shapeScore + 0.2 * ocrScore;
+      // OCR imprint dominates — without it, score stays below accept threshold
+      const score =
+        0.15 * apiScore + 0.15 * colorScore + 0.1 * shapeScore + 0.6 * ocrScore;
       return { ...c, rerankScore: score, colorScore, shapeScore, ocrScore, apiScore };
     })
     .sort((a, b) => b.rerankScore - a.rerankScore);
+
+  return ranked;
+}
+
+/** Accept only when imprint clearly matches DB marking. */
+export function pickBestCandidate(ranked, { minOcrScore = 0.7, minRerank = 0.55 } = {}) {
+  if (!ranked?.length) return null;
+  const best = ranked[0];
+  if ((best.ocrScore || 0) < minOcrScore) return null;
+  if ((best.rerankScore || 0) < minRerank) return null;
+  return best;
 }
 
 /**

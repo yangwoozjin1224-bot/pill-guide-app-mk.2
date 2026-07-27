@@ -13,6 +13,8 @@ import {
   classifyDetection,
   clusterByEmbedding,
   rerankCandidates,
+  pickBestCandidate,
+  isValidImprintMark,
 } from "./classify.js";
 import { getOcrWorker, recognizeCanvas, terminateOcrWorker } from "./ocr.js";
 import { prepareDocumentForOcr, extractDrugNameCandidates } from "./document.js";
@@ -127,6 +129,21 @@ export async function recognizePillsPipeline(source, options = {}) {
   const clusterPayload = [];
   for (const cluster of clusters) {
     const rep = cluster.representative;
+    // No valid imprint → skip API. Color/shape-only returns arbitrary first hits.
+    if (!isValidImprintMark(rep.mark)) {
+      clusterPayload.push({
+        clusterId: cluster.id,
+        mark: rep.mark || "",
+        color: rep.color,
+        shape: rep.shape,
+        confidence: rep.confidence,
+        top5: [],
+        best: null,
+        memberIds: cluster.members.map((m) => m.id),
+      });
+      continue;
+    }
+
     let candidates = [];
     if (typeof classifyFn === "function") {
       try {
@@ -148,7 +165,7 @@ export async function recognizePillsPipeline(source, options = {}) {
       mark: rep.mark,
     }).slice(0, 5);
 
-    const best = top5[0] || null;
+    const best = pickBestCandidate(top5);
     clusterPayload.push({
       clusterId: cluster.id,
       mark: rep.mark,

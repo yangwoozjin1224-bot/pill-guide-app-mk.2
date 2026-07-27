@@ -100,13 +100,19 @@ async function searchPillList(itemName) {
   return Array.from(map.values());
 }
 
-/** Classification용 Top-K 후보 (Detection과 분리 — API 원본 목록) */
+/** Classification용 Top-K 후보 — 각인(mark) 필수. 색/모양만으로 조회하지 않음. */
 async function fetchPillTopCandidates({ shape, color, mark, itemName, markCandidates } = {}, topK = 5) {
   const marks = [
     mark,
     ...((markCandidates || []).map((m) => (typeof m === "string" ? m : m.mark)).filter(Boolean)),
-  ].filter(Boolean);
-  const uniqueMarks = [...new Set(marks.map((m) => String(m).toUpperCase()))].slice(0, 3);
+  ]
+    .map((m) => String(m || "").toUpperCase().replace(/[^A-Z0-9]/g, ""))
+    .filter((m) => m.length >= 2 && m.length <= 14);
+
+  const uniqueMarks = [...new Set(marks)].slice(0, 3);
+  // Critical: without imprint, API returns arbitrary first white/round pills (false positives)
+  if (!uniqueMarks.length) return [];
+
   const map = new Map();
 
   const pull = async (query) => {
@@ -141,56 +147,77 @@ async function fetchPillTopCandidates({ shape, color, mark, itemName, markCandid
     }
   };
 
-  if (uniqueMarks.length) {
-    for (const m of uniqueMarks) {
-      await pull({
-        print_front: m,
-        ...(color ? { color_class1: color } : {}),
-        ...(shape ? { drug_shape: shape } : {}),
-      });
-    }
-  } else {
+  for (const m of uniqueMarks) {
     await pull({
+      print_front: m,
       ...(color ? { color_class1: color } : {}),
       ...(shape ? { drug_shape: shape } : {}),
-      ...(itemName ? { item_name: itemName } : {}),
     });
+    // Also try mark alone (API color filter can be too strict)
+    if (color || shape) {
+      await pull({ print_front: m });
+    }
   }
 
   return Array.from(map.values()).slice(0, Math.max(topK, 8));
 }
 
 async function fetchPillIdentification({ shape, color, mark, itemName, itemSeq } = {}) {
+  const cleanMark = String(mark || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  // itemSeq lookup is exact; mark-less color/shape queries are forbidden (false positives)
+  if (!itemSeq && !itemName && cleanMark.length < 2) {
+    throw new Error("알약 각인(표기)을 읽지 못했습니다");
+  }
+
   const query = {
     type: "json", numOfRows: "20", pageNo: "1",
     ...(itemSeq ? { item_seq: itemSeq } : {}),
     ...(itemName ? { item_name: itemName } : {}),
-    ...(mark ? { print_front: mark } : {}),
-    ...(color ? { color_class1: color } : {}),
-    ...(shape ? { drug_shape: shape } : {}),
+    ...(cleanMark ? { print_front: cleanMark } : {}),
+    ...(color && cleanMark ? { color_class1: color } : {}),
+    ...(shape && cleanMark ? { drug_shape: shape } : {}),
   };
   const json = await dataGoFetchJson("PILL_IDENTIFICATION", query);
   const items = normalizeItems(json?.body?.items);
   if (!items.length) throw new Error("일치하는 알약 정보를 찾을 수 없습니다");
 
-  let item = items[0];
-  if (mark) {
-    const upper = String(mark).toUpperCase();
-    const scored = items
-      .map((it) => {
-        const front = String(it.PRINT_FRONT || "").toUpperCase();
-        const back = String(it.PRINT_BACK || "").toUpperCase();
-        let score = 0;
-        if (front === upper || back === upper) score += 100;
-        else if (front.includes(upper) || upper.includes(front) || back.includes(upper)) score += 50;
-        if (color && String(it.COLOR_CLASS1 || "").includes(color)) score += 20;
-        if (shape && String(it.DRUG_SHAPE || "").includes(shape)) score += 10;
-        return { it, score };
-      })
-      .sort((a, b) => b.score - a.score);
-    if (scored[0]?.score > 0) item = scored[0].it;
+  // Exact item_seq fetch
+  if (itemSeq && !cleanMark) {
+    const item = items[0];
+    return {
+      itemSeq: item.ITEM_SEQ || item.itemSeq,
+      itemName: item.ITEM_NAME || item.itemName,
+      entpName: item.ENTP_NAME || item.entpName,
+      imageUrl: item.ITEM_IMAGE || item.itemImage,
+      chart: item.CHART,
+      tag: item.CLASS_NAME || "의약품",
+    };
   }
 
+  const upper = cleanMark;
+  const scored = items
+    .map((it) => {
+      const front = String(it.PRINT_FRONT || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      const back = String(it.PRINT_BACK || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      let score = 0;
+      if (front === upper || back === upper) score += 100;
+      else if (upper.length >= 3 && (front.includes(upper) || upper.includes(front) || back.includes(upper) || upper.includes(back))) {
+        score += 50;
+      } else if (upper.length >= 2 && (front === upper || back === upper)) {
+        score += 40;
+      }
+      if (color && String(it.COLOR_CLASS1 || "").includes(color)) score += 20;
+      if (shape && String(it.DRUG_SHAPE || "").includes(String(shape).replace("형", ""))) score += 10;
+      return { it, score };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  // Never fall back to items[0] when mark does not match
+  if (!scored[0] || scored[0].score < 50) {
+    throw new Error("각인이 일치하는 알약을 찾지 못했습니다");
+  }
+
+  const item = scored[0].it;
   return {
     itemSeq: item.ITEM_SEQ || item.itemSeq,
     itemName: item.ITEM_NAME || item.itemName,
@@ -668,7 +695,10 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     processingRef.current = true;
     setStatus("loading");
 
-    const hits = (pipelineResult.results || []).filter((r) => r.best);
+    // Only accept hits with imprint-matched best (blocks color-only false positives)
+    const hits = (pipelineResult.results || []).filter(
+      (r) => r.best && r.mark && String(r.mark).length >= 2 && (r.best.ocrScore ?? 1) >= 0.7
+    );
     const marks = [...new Set(hits.map((r) => r.mark).filter(Boolean))];
     setDetectedMarks(marks);
 
@@ -678,9 +708,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     }
 
     if (!hits.length) {
-      setStatus("error");
-      setErrorMsg("인식된 알약으로 약을 찾지 못했습니다. 직접 입력해보세요.");
-      return;
+      processingRef.current = false;
+      return false;
     }
 
     try {
@@ -693,12 +722,12 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             return { ...detail, detectedMark: r.mark, rerankScore: best.rerankScore };
           }
           return fetchPillData(
-            { mark: r.mark, color: r.color, shape: r.shape, itemName: r.mark },
+            { mark: r.mark, color: r.color, shape: r.shape },
             schedule
           ).then((p) => ({ ...p, detectedMark: r.mark }));
         })
       );
-      if (cancelledRef.current) return;
+      if (cancelledRef.current) return true;
 
       const pills = [];
       const seen = new Set();
@@ -712,9 +741,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       }
 
       if (!pills.length) {
-        setStatus("error");
-        setErrorMsg("인식된 표기로 약을 찾지 못했습니다. 직접 입력해보세요.");
-        return;
+        processingRef.current = false;
+        return false;
       }
 
       if (pills.length === 1) {
@@ -722,16 +750,18 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         setDetailSource("scan");
         setActivePill(pills[0]);
         setScreen("detail");
-        return;
+        return true;
       }
 
       setFoundPills(pills);
       setStatus("results");
       stopCamera();
+      return true;
     } catch (err) {
-      if (cancelledRef.current) return;
+      if (cancelledRef.current) return true;
       setStatus("error");
       setErrorMsg(err.message || "알약을 찾을 수 없습니다");
+      return true;
     }
   };
 
@@ -746,16 +776,17 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
     try {
       const settled = await Promise.allSettled(
-        list.map((d) =>
-          fetchPillData(
-            {
-              mark: d.mark,
-              itemName: d.mark,
-              ...(d.color ? { color: d.color } : {}),
-            },
-            schedule
+        list
+          .filter((d) => d.mark && String(d.mark).replace(/[^A-Za-z0-9]/g, "").length >= 2)
+          .map((d) =>
+            fetchPillData(
+              {
+                mark: d.mark,
+                ...(d.color ? { color: d.color } : {}),
+              },
+              schedule
+            )
           )
-        )
       );
       if (cancelledRef.current) return;
 
@@ -842,6 +873,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     let stopped = false;
     let emptyTries = 0;
     let totalTries = 0;
+    let lastMarkKey = "";
+    let confirmCount = 0;
 
     const fail = (msg) => {
       stopped = true;
@@ -865,8 +898,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       }
 
       totalTries += 1;
-      if (totalTries > 8) {
-        fail("알약 인식에 실패했습니다. 밝은 곳에서 다시 시도하거나 표기를 직접 입력해주세요.");
+      if (totalTries > 10) {
+        fail("알약 인식에 실패했습니다. 밝은 곳에서 각인이 보이게 다시 시도하거나 표기를 직접 입력해주세요.");
         return;
       }
 
@@ -877,7 +910,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           maxInstances: 8,
           shareByEmbedding: true,
           scales: [640, 960, 1280],
-          minConfidenceKeep: 0.18,
+          minConfidenceKeep: 0.22,
           twoPass: true,
         });
         if (stopped || cancelledRef.current || processingRef.current) return;
@@ -890,12 +923,17 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         }
 
         const withMark = dets.filter((d) => d.mark && d.mark.length >= 2);
-        const withBest = dets.filter((d) => d.best);
+        const withBest = dets.filter(
+          (d) => d.best && d.mark && (d.best.ocrScore ?? 0) >= 0.7
+        );
 
-        if (!dets.length) {
+        if (!withMark.length && !withBest.length) {
           emptyTries += 1;
-          if (emptyTries >= 5) {
-            fail("알약을 찾지 못했습니다. 약봉지를 펼쳐 알약이 보이게 한 뒤 다시 시도해주세요.");
+          lastMarkKey = "";
+          confirmCount = 0;
+          // Detections without imprint must NOT become a drug result
+          if (emptyTries >= 6) {
+            fail("알약 각인(표기)을 읽지 못했습니다. 글자가 보이게 가까이 찍거나 직접 입력해주세요.");
             return;
           }
           timerId = setTimeout(tick, 280);
@@ -903,14 +941,36 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         }
 
         emptyTries = 0;
+        const key = (withBest.length ? withBest : withMark)
+          .map((d) => d.mark)
+          .filter(Boolean)
+          .sort()
+          .join("|");
 
-        if (withBest.length) {
-          await finalizePipelineResults(pipelineResult);
+        if (key && key === lastMarkKey) confirmCount += 1;
+        else {
+          lastMarkKey = key;
+          confirmCount = 1;
+        }
+
+        // Require same imprint twice to avoid one-frame OCR hallucinations
+        if (confirmCount < 2) {
+          timerId = setTimeout(tick, 300);
           return;
         }
 
-        if (withMark.length && totalTries >= 3) {
-          // OCR만 성공한 경우 mark로 재조회
+        if (withBest.length) {
+          const ok = await finalizePipelineResults(pipelineResult);
+          if (!ok && !stopped && !cancelledRef.current) {
+            processingRef.current = false;
+            confirmCount = 0;
+            lastMarkKey = "";
+            timerId = setTimeout(tick, 320);
+          }
+          return;
+        }
+
+        if (withMark.length) {
           await lookupMarks(withMark.map((d) => ({ mark: d.mark, color: d.color || "" })));
           return;
         }
