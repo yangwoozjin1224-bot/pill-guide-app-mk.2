@@ -114,40 +114,32 @@ async function scoreImprintVariants(worker, canvases, scoreMap) {
 }
 
 /**
- * OCR imprint with rotation + photometric TTA.
- * Fast pass: 0/90/180/270. Weak results expand to ±15/±30 and lighting augs.
- * (Client has no training loop — inference TTA stands in for rotation/brightness aug.)
+ * OCR imprint with rotation TTA (fast realtime path).
+ * thorough=true expands angles/lighting when first pass is weak.
  */
 export async function extractImprintOcr(cropCanvas, worker, { thorough = false } = {}) {
   if (!worker || !cropCanvas) return { mark: "", confidence: 0, all: [] };
 
   const scoreMap = new Map();
-  for (const deg of [0, 90, 180, 270]) {
+  // Realtime: 0° + 180° first (most pills), then 90/270 if needed
+  for (const deg of [0, 180]) {
     const rotated = deg === 0 ? cropCanvas : rotateCanvas(cropCanvas, deg);
     const base = preprocessForOcr(rotated);
     await scoreImprintVariants(worker, [base, adaptiveThresholdCanvas(base)], scoreMap);
   }
 
   let ranked = Array.from(scoreMap.entries()).sort((a, b) => b[1] - a[1]);
-  const weak = !ranked.length || ranked[0][1] < 80;
+  const weak = !ranked.length || ranked[0][1] < 60;
 
   if (thorough || weak) {
-    for (const deg of [15, -15, 30, -30]) {
+    for (const deg of [90, 270, 15, -15]) {
       const rotated = rotateCanvas(cropCanvas, deg);
       const base = preprocessForOcr(rotated);
-      await scoreImprintVariants(
-        worker,
-        [base, invertCanvas(adaptiveThresholdCanvas(base))],
-        scoreMap
-      );
-    }
-    for (const light of [
-      { brightness: 0.1, contrast: 1.2 },
-      { brightness: -0.1, contrast: 1.15, gamma: 1.2 },
-    ]) {
-      const lit = applyLightingAug(cropCanvas, light);
-      const base = preprocessForOcr(lit);
       await scoreImprintVariants(worker, [adaptiveThresholdCanvas(base)], scoreMap);
+    }
+    if (thorough || !ranked.length || ranked[0]?.[1] < 45) {
+      const lit = applyLightingAug(cropCanvas, { brightness: 0.08, contrast: 1.15 });
+      await scoreImprintVariants(worker, [adaptiveThresholdCanvas(preprocessForOcr(lit))], scoreMap);
     }
     ranked = Array.from(scoreMap.entries()).sort((a, b) => b[1] - a[1]);
   }
@@ -155,8 +147,10 @@ export async function extractImprintOcr(cropCanvas, worker, { thorough = false }
   if (!ranked.length) return { mark: "", confidence: 0, all: [] };
   const filtered = ranked.filter(([m]) => isValidImprintMark(m));
   if (!filtered.length) return { mark: "", confidence: 0, all: [] };
-  // Require a minimum OCR vote score so random noise doesn't become a "mark"
-  if (filtered[0][1] < 55) return { mark: "", confidence: 0, all: filtered.slice(0, 5).map(([mark, score]) => ({ mark, score })) };
+  // Soft floor — realtime OCR votes are lower than offline
+  if (filtered[0][1] < 28) {
+    return { mark: "", confidence: 0, all: filtered.slice(0, 5).map(([mark, score]) => ({ mark, score })) };
+  }
   return {
     mark: filtered[0][0],
     confidence: filtered[0][1],
@@ -164,16 +158,13 @@ export async function extractImprintOcr(cropCanvas, worker, { thorough = false }
   };
 }
 
-/** Reject OCR garbage that used to match random API first-hits (e.g. 졸뎀속붕정). */
+/** Reject only obvious OCR garbage (keep real short marks like TY, 10). */
 export function isValidImprintMark(mark) {
   const m = String(mark || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   if (m.length < 2 || m.length > 14) return false;
-  // Single repeated char / pure noise
   if (/^(.)\1+$/.test(m)) return false;
-  // Very common false OCR tokens
   const ban = new Set([
-    "II", "III", "OO", "O0", "0O", "OL", "IO", "OI", "TO", "OT",
-    "THE", "AND", "FOR", "TAB", "CAP", "MG", "ML", "DOS", "DAY",
+    "II", "III", "OO", "O0", "0O", "THE", "AND", "FOR", "TAB", "CAP", "MG", "ML", "DOS", "DAY",
   ]);
   if (ban.has(m)) return false;
   return true;
@@ -183,66 +174,102 @@ function normalizeMark(s) {
   return String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
+function editDistance(a, b) {
+  const m = a.length;
+  const n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[m][n];
+}
+
 /** How well OCR imprint matches DB PRINT_FRONT/BACK (0..1). */
 export function imprintMatchScore(ocrMark, candidate) {
   const mark = normalizeMark(ocrMark);
   if (!mark) return 0;
   const front = normalizeMark(candidate.mark || candidate.PRINT_FRONT || "");
   const back = normalizeMark(candidate.PRINT_BACK || "");
-  if (!front && !back) return 0;
-  if (front === mark || back === mark) return 1;
-  if ((front && (front.includes(mark) || mark.includes(front))) ||
-      (back && (back.includes(mark) || mark.includes(back)))) {
-    // Prefer longer overlap; short marks like "1" must not dominate
-    const ref = front.includes(mark) || mark.includes(front) ? front : back;
-    const overlap = Math.min(mark.length, ref.length) / Math.max(mark.length, ref.length);
-    return mark.length >= 3 ? 0.7 + 0.25 * overlap : 0.35 * overlap;
+  const sides = [front, back].filter(Boolean);
+  if (!sides.length) return 0;
+
+  let best = 0;
+  for (const ref of sides) {
+    if (ref === mark) best = Math.max(best, 1);
+    else if (ref.includes(mark) || mark.includes(ref)) {
+      const overlap = Math.min(mark.length, ref.length) / Math.max(mark.length, ref.length);
+      best = Math.max(best, mark.length >= 2 ? 0.55 + 0.4 * overlap : 0.2);
+    } else {
+      const dist = editDistance(mark, ref);
+      const maxLen = Math.max(mark.length, ref.length);
+      if (maxLen >= 3 && dist <= 1) best = Math.max(best, 0.8);
+      else if (maxLen >= 4 && dist <= 2) best = Math.max(best, 0.65);
+      else if (mark.length >= 3 && ref.length >= 3) {
+        // shared prefix/suffix boost (OCR often clips ends)
+        let pref = 0;
+        while (pref < mark.length && pref < ref.length && mark[pref] === ref[pref]) pref += 1;
+        if (pref >= 2) best = Math.max(best, 0.45 + 0.1 * pref);
+      }
+    }
   }
-  return 0;
+  return best;
 }
 
 /**
- * Re-rank Top-K API candidates with visual cues.
- * Why strict OCR gate: color/shape-only queries return arbitrary first rows
- * (often 졸뎀속붕정 for white/round). Never promote those without imprint match.
+ * Re-rank Top-K. Candidates should already come from print_front queries.
+ * Color/shape help break ties; imprint similarity still required to accept.
  */
 export function rerankCandidates(candidates, cues) {
   const { color, shape, mark } = cues;
   const validMark = isValidImprintMark(mark) ? normalizeMark(mark) : "";
   const n = Math.max(candidates.length, 1);
 
-  const ranked = candidates
+  return candidates
     .map((c, idx) => {
       const apiScore = 1 - idx / n;
       const cColor = String(c.color || c.COLOR_CLASS1 || "");
       const cShape = String(c.shape || c.DRUG_SHAPE || "");
       const ocrScore = validMark ? imprintMatchScore(validMark, c) : 0;
 
-      const colorScore = color && cColor.includes(color) ? 1 : color && cColor ? 0.15 : 0.4;
+      const colorScore = color && cColor.includes(color) ? 1 : color && cColor ? 0.2 : 0.45;
       const shapeScore =
         shape && cShape.includes(String(shape).replace("형", ""))
           ? 1
           : shape && cShape
-            ? 0.2
-            : 0.4;
+            ? 0.25
+            : 0.45;
 
-      // OCR imprint dominates — without it, score stays below accept threshold
+      // Queried-by-mark candidates get a small prior so unique API hits can pass
+      const queriedPrior = validMark ? 0.2 : 0;
       const score =
-        0.15 * apiScore + 0.15 * colorScore + 0.1 * shapeScore + 0.6 * ocrScore;
+        0.2 * apiScore + 0.15 * colorScore + 0.1 * shapeScore + 0.55 * ocrScore + queriedPrior;
       return { ...c, rerankScore: score, colorScore, shapeScore, ocrScore, apiScore };
     })
     .sort((a, b) => b.rerankScore - a.rerankScore);
-
-  return ranked;
 }
 
-/** Accept only when imprint clearly matches DB marking. */
-export function pickBestCandidate(ranked, { minOcrScore = 0.7, minRerank = 0.55 } = {}) {
+/**
+ * Accept when imprint is plausible.
+ * - Strong OCR match (>=0.55) OR
+ * - Soft match (>=0.35) with decent rerank (API already filtered by print_front)
+ */
+export function pickBestCandidate(ranked, { minOcrScore = 0.35, minRerank = 0.4 } = {}) {
   if (!ranked?.length) return null;
   const best = ranked[0];
-  if ((best.ocrScore || 0) < minOcrScore) return null;
-  if ((best.rerankScore || 0) < minRerank) return null;
-  return best;
+  const ocr = best.ocrScore || 0;
+  const rr = best.rerankScore || 0;
+  if (ocr >= 0.55 && rr >= 0.35) return best;
+  if (ocr >= minOcrScore && rr >= minRerank) return best;
+  // Single API hit with any imprint overlap — likely correct for that print_front query
+  if (ranked.length === 1 && ocr >= 0.25 && rr >= 0.3) return best;
+  return null;
 }
 
 /**
