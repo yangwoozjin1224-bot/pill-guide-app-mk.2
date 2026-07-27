@@ -486,12 +486,11 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   const [manualMark, setManualMark] = useState("");
   const [detectedMark, setDetectedMark] = useState("");
   const cancelledRef = useRef(false);
-  const ocrBusyRef = useRef(false);
   const processingRef = useRef(false);
-  const lastMarkRef = useRef("");
-  const confirmCountRef = useRef(0);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const workerRef = useRef(null);
+  const canvasRef = useRef(null);
 
   const stopCamera = () => {
     if (!streamRef.current) return;
@@ -512,7 +511,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     stopCamera();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 960 }, height: { ideal: 720 } },
         audio: false,
       });
       streamRef.current = stream;
@@ -529,33 +528,74 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     }
   };
 
+  // 카메라 + OCR 워커를 한 번만 준비 (재사용이 속도의 핵심)
   useEffect(() => {
-    openCamera();
-    return () => stopCamera();
+    let alive = true;
+    cancelledRef.current = false;
+
+    (async () => {
+      await openCamera();
+      try {
+        const worker = await Tesseract.createWorker("eng", 1, {
+          // logger 끔 = 불필요 오버헤드 감소
+        });
+        await worker.setParameters({
+          tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+          tessedit_pageseg_mode: "7", // 한 줄 텍스트 (알약 표기용, 더 빠름)
+        });
+        if (!alive) {
+          await worker.terminate();
+          return;
+        }
+        workerRef.current = worker;
+      } catch (err) {
+        console.error("OCR 워커 초기화 실패:", err);
+      }
+    })();
+
+    return () => {
+      alive = false;
+      cancelledRef.current = true;
+      stopCamera();
+      if (workerRef.current) {
+        workerRef.current.terminate();
+        workerRef.current = null;
+      }
+    };
   }, []);
 
-  const captureFrame = () => {
+  // 중앙 프레임만 잘라 작은 이미지로 OCR (전체 프레임보다 훨씬 빠름)
+  const captureCenterFrame = () => {
     const video = videoRef.current;
     if (!video || !video.videoWidth || !video.videoHeight) return null;
-    const scale = video.videoWidth > 640 ? 640 / video.videoWidth : 1;
-    const w = Math.floor(video.videoWidth * scale);
-    const h = Math.floor(video.videoHeight * scale);
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const crop = Math.min(vw, vh) * 0.5; // 중앙 50% 영역
+    const sx = (vw - crop) / 2;
+    const sy = (vh - crop) / 2;
+    const out = 280; // OCR용 저해상도
+
+    if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
+    const canvas = canvasRef.current;
+    canvas.width = out;
+    canvas.height = out;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return null;
-    ctx.filter = "grayscale(1) contrast(1.7)";
-    ctx.drawImage(video, 0, 0, w, h);
-    return canvas.toDataURL("image/jpeg", 0.85);
+
+    ctx.filter = "grayscale(1) contrast(1.8) brightness(1.05)";
+    ctx.drawImage(video, sx, sy, crop, crop, 0, 0, out, out);
+    ctx.filter = "none";
+    return canvas;
   };
 
-  const extractMarkWithOcr = async (imageDataUrl) => {
-    const result = await Tesseract.recognize(imageDataUrl, "eng", {
-      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-    });
+  const extractMarkWithOcr = async (canvas) => {
+    const worker = workerRef.current;
+    if (!worker) return null;
+
+    const result = await worker.recognize(canvas);
     const text = (result?.data?.text || "").toUpperCase();
-    const candidates = text.match(/[A-Z0-9]{3,}/g) || [];
+    const candidates = text.match(/[A-Z0-9]{3,12}/g) || [];
     if (!candidates.length) return null;
     candidates.sort((a, b) => b.length - a.length);
     return candidates[0].trim();
@@ -577,8 +617,6 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       setStatus("error");
       setErrorMsg(err.message || "알약을 찾을 수 없습니다");
       processingRef.current = false;
-      lastMarkRef.current = "";
-      confirmCountRef.current = 0;
     }
   };
 
@@ -589,61 +627,62 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     await lookupMark(manual);
   };
 
-  // 실시간 OCR 루프: 2.5초마다 프레임 분석, 동일 표기 2회 연속이면 API 조회
+  // 빠른 연속 OCR: 한 번 끝나면 바로 다음 프레임 분석 (고정 2.5초 대기 제거)
   useEffect(() => {
     if (cameraError) return;
 
     cancelledRef.current = false;
     processingRef.current = false;
-    lastMarkRef.current = "";
-    confirmCountRef.current = 0;
     setStatus("scanning");
 
-    const intervalId = setInterval(async () => {
-      if (cancelledRef.current || processingRef.current || ocrBusyRef.current) return;
+    let timerId = null;
+    let stopped = false;
 
-      const frame = captureFrame();
-      if (!frame) return;
+    const tick = async () => {
+      if (stopped || cancelledRef.current || processingRef.current) return;
 
-      ocrBusyRef.current = true;
+      // 워커/카메라 준비 전이면 짧게 재시도
+      if (!workerRef.current || !videoRef.current?.videoWidth) {
+        timerId = setTimeout(tick, 200);
+        return;
+      }
+
+      const frame = captureCenterFrame();
+      if (!frame) {
+        timerId = setTimeout(tick, 200);
+        return;
+      }
+
       setStatus("ocr");
       try {
         const mark = await extractMarkWithOcr(frame);
-        if (cancelledRef.current || processingRef.current) return;
+        if (stopped || cancelledRef.current || processingRef.current) return;
 
         if (!mark) {
-          lastMarkRef.current = "";
-          confirmCountRef.current = 0;
           setDetectedMark("");
           setStatus("scanning");
+          timerId = setTimeout(tick, 120); // 실패 시 바로 재시도
           return;
         }
 
         setDetectedMark(mark);
-        if (mark === lastMarkRef.current) {
-          confirmCountRef.current += 1;
-        } else {
-          lastMarkRef.current = mark;
-          confirmCountRef.current = 1;
-        }
-
-        if (confirmCountRef.current >= 2) {
-          clearInterval(intervalId);
-          await lookupMark(mark);
-          return;
-        }
-
-        setStatus("scanning");
+        // 표기 한 번만 잡히면 즉시 조회 (이전: 2회 연속 + 2.5초 간격)
+        await lookupMark(mark);
+        return;
       } catch {
-        if (!cancelledRef.current && !processingRef.current) setStatus("scanning");
-      } finally {
-        ocrBusyRef.current = false;
+        if (!stopped && !cancelledRef.current && !processingRef.current) {
+          setStatus("scanning");
+          timerId = setTimeout(tick, 200);
+        }
       }
-    }, 2500);
+    };
+
+    timerId = setTimeout(tick, 300);
 
     return () => {
+      stopped = true;
       cancelledRef.current = true;
-      clearInterval(intervalId);
+      if (timerId) clearTimeout(timerId);
     };
   }, [cameraError]);
 
