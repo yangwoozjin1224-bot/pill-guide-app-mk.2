@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { Home, Search, Camera, Clock, ChevronLeft, ChevronRight, Volume2, Check, FileText } from "lucide-react";
+import { Home, Search, Camera, Clock, ChevronLeft, ChevronRight, Volume2, Check } from "lucide-react";
 import Tesseract from "tesseract.js";
 
 // ---- Design tokens (reference images) ----
