@@ -1,219 +1,348 @@
 import { useState, useEffect, useRef } from "react";
-import { Home, Search, Camera, Clock, ChevronLeft, ChevronRight, Volume2, AlarmClock, FileText, Check } from "lucide-react";
+import { Home, Search, Camera, Clock, ChevronLeft, ChevronRight, Volume2, Check } from "lucide-react";
+import {
+  runVisionSearch,
+  recognizeDocumentPipeline,
+  terminateOcrWorker,
+  getSessionBagHints,
+  setSessionBagContext,
+} from "./vision/pipeline.js";
+import { formatMetricsSummary, getMetrics } from "./vision/metrics.js";
 
-// ---- Design tokens (from spec) ----
-// bg: #FFFFFF | primary/header: #002B49 | text: #000000 | accent: #FFD700
-// body >= 24pt(~32px) | title >= 32pt(~43px) | buttons >= 70px tall
+// ---- Design tokens (reference images) ----
+const RED = "#E53E3E";
+const RED_LIGHT = "#FFF5F5";
+const BG = "#F5F5F7";
+const CARD = "#FFFFFF";
+const BLACK = "#1A1A1A";
+const GRAY = "#9CA3AF";
+const GRAY2 = "#6B7280";
+const BORDER = "#E8E8E8";
+const GREEN = "#059669";
+const GREEN_BG = "#ECFDF5";
+const BLUE_CARD = "#EFF6FF";
 
-const NAVY = "#002B49";
-const YELLOW = "#FFD700";
-const SCAN_CARD_BG = "#DCEBFA"; // much lighter blue for the pill-scan card
-const SCAN_BUTTON_BG = "#3B82D6"; // medium blue for the "촬영하러 가기" button, matched to the lighter card
-
-// ============================================================================
-// 공공데이터 API 서비스 모듈 (Service / API Module)
-// ----------------------------------------------------------------------------
-// 실제 서비스 키는 배포 환경의 환경변수로 주입하세요. (.env 파일 등)
-// CRA 기준: REACT_APP_API_KEY, Vite 기준이라면 import.meta.env.VITE_API_KEY 로 교체하세요.
-// 대부분의 data.go.kr API는 서버사이드 프록시를 통해 호출하는 것을 권장합니다(CORS 정책).
-// ============================================================================
 const API_KEY =
   (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_API_KEY) ||
   (typeof process !== "undefined" && process.env && process.env.REACT_APP_API_KEY) ||
   "YOUR_SERVICE_KEY";
 
-const IS_DEMO_KEY = !API_KEY || API_KEY === "YOUR_SERVICE_KEY";
+const HAS_API_KEY = !!API_KEY && API_KEY !== "YOUR_SERVICE_KEY";
 
 const API_ENDPOINTS = {
-  // 1. 식품의약품안전처 - 의약품 낱알식별 정보 API
-  PILL_IDENTIFICATION:
-    "https://apis.data.go.kr/1471000/MdcinGrnIdntfcInfoService02/getMdcinGrnIdntfcInfoList02",
-  // 2. 건강보험심사평가원 - 의약품성분약효정보조회서비스 API
-  DRUG_EFFICACY:
-    "https://apis.data.go.kr/B551182/msupCmpnMcareInfoService/getMsupCmpnMcareInq",
-  // 3. 식품의약품안전처 - 의약품안전사용서비스(DUR) API
-  DUR_INFO:
-    "https://apis.data.go.kr/1471000/DURPrdlstInfoService03/getUsjntTabooInfoList03",
-  // 4. 식품의약품안전처 - 의약품 개요정보(e약은요) API
-  EASY_DRUG_INFO:
-    "https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList",
+  PILL_IDENTIFICATION: "https://apis.data.go.kr/1471000/MdcinGrnIdntfcInfoService03/getMdcinGrnIdntfcInfoList03",
+  DRUG_EFFICACY: "https://apis.data.go.kr/B551182/msupCmpnMcareInfoService/getMsupCmpnMcareInq",
+  DUR_INFO: "https://apis.data.go.kr/1471000/DURPrdlstInfoService03/getUsjntTabooInfoList03",
+  EASY_DRUG_INFO: "https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList",
 };
 
-// ---- 1) 의약품 낱알식별 정보 API : 모양/색상/식별문자 또는 이름으로 품목 특정 ----
-async function fetchPillIdentification({ shape, color, mark, itemName } = {}) {
-  const query = new URLSearchParams({
-    serviceKey: API_KEY,
-    type: "json",
-    numOfRows: "1",
-    pageNo: "1",
+const DATA_GO_PROXY_URL = "/api/data-go-proxy";
+
+function normalizeItems(items) {
+  if (!items) return [];
+  if (Array.isArray(items)) return items;
+  return [items];
+}
+
+async function dataGoFetchJson(action, query) {
+  const qs = new URLSearchParams(query);
+  const proxyUrl = `${DATA_GO_PROXY_URL}?action=${encodeURIComponent(action)}&${qs.toString()}`;
+  try {
+    const proxyRes = await fetch(proxyUrl);
+    if (proxyRes.ok) return await proxyRes.json();
+  } catch {}
+  if (!HAS_API_KEY) {
+    throw new Error("공공데이터 API 서비스 키가 설정되어 있지 않습니다.");
+  }
+  const baseUrl = API_ENDPOINTS[action];
+  if (!baseUrl) throw new Error(`Unknown action: ${action}`);
+  const directQuery = new URLSearchParams({ ...query, serviceKey: API_KEY });
+  const res = await fetch(`${baseUrl}?${directQuery.toString()}`);
+  if (!res.ok) throw new Error("공공 API 호출 실패");
+  return await res.json();
+}
+
+async function searchPillList(itemName) {
+  const q = String(itemName || "").trim();
+  if (!q) return [];
+  const map = new Map();
+  try {
+    const easy = await dataGoFetchJson("EASY_DRUG_INFO", { type: "json", numOfRows: "30", pageNo: "1", itemName: q });
+    for (const it of normalizeItems(easy?.body?.items)) {
+      const id = String(it.itemSeq || "");
+      if (!id) continue;
+      map.set(id, {
+        id, itemSeq: id,
+        name: it.itemName || "이름 없음",
+        entpName: it.entpName || "",
+        tag: "의약품",
+        effect: it.efcyQesitm || "",
+        timing: it.useMethodQesitm || "",
+        caution: it.atpnWarnQesitm || it.atpnQesitm || "",
+        imageUrl: it.itemImage || "",
+      });
+    }
+  } catch (err) { console.warn("e약은요 검색 실패:", err); }
+  try {
+    const idnt = await dataGoFetchJson("PILL_IDENTIFICATION", { type: "json", numOfRows: "30", pageNo: "1", item_name: q });
+    for (const it of normalizeItems(idnt?.body?.items)) {
+      const id = String(it.ITEM_SEQ || "");
+      if (!id) continue;
+      const prev = map.get(id) || {};
+      map.set(id, {
+        ...prev, id, itemSeq: id,
+        name: it.ITEM_NAME || prev.name || "이름 없음",
+        entpName: it.ENTP_NAME || prev.entpName || "",
+        tag: it.CLASS_NAME || prev.tag || "의약품",
+        imageUrl: it.ITEM_IMAGE || prev.imageUrl || "",
+        mark: it.PRINT_FRONT || "", shape: it.DRUG_SHAPE || "", color: it.COLOR_CLASS1 || "",
+      });
+    }
+  } catch (err) { console.warn("낱알식별 검색 실패:", err); }
+  return Array.from(map.values());
+}
+
+/** Vision Search candidate pool — imprint / name guided (never color-only). */
+async function fetchPillTopCandidates({ shape, color, mark, itemName, markCandidates } = {}, topK = 5) {
+  const raw = [
+    mark,
+    ...((markCandidates || []).map((m) => (typeof m === "string" ? m : m.mark)).filter(Boolean)),
+  ]
+    .map((m) => String(m || "").toUpperCase().replace(/[^A-Z0-9]/g, ""))
+    .filter((m) => m.length >= 2 && m.length <= 14);
+
+  const expanded = [];
+  for (const m of raw) {
+    expanded.push(m);
+    if (m.length >= 4) expanded.push(m.slice(0, 4), m.slice(0, 3));
+    if (m.length >= 3) expanded.push(m.slice(0, 3));
+  }
+
+  const uniqueMarks = [...new Set(expanded)].slice(0, 6);
+  const nameQ = String(itemName || "").trim();
+  if (!uniqueMarks.length && !nameQ) return [];
+
+  const map = new Map();
+
+  const pull = async (query) => {
+    try {
+      const json = await dataGoFetchJson("PILL_IDENTIFICATION", {
+        type: "json",
+        numOfRows: "15",
+        pageNo: "1",
+        ...query,
+      });
+      for (const it of normalizeItems(json?.body?.items)) {
+        const id = String(it.ITEM_SEQ || "");
+        if (!id || map.has(id)) continue;
+        map.set(id, {
+          itemSeq: id,
+          name: it.ITEM_NAME || "",
+          itemName: it.ITEM_NAME || "",
+          entpName: it.ENTP_NAME || "",
+          imageUrl: it.ITEM_IMAGE || "",
+          tag: it.CLASS_NAME || "의약품",
+          mark: it.PRINT_FRONT || "",
+          PRINT_FRONT: it.PRINT_FRONT || "",
+          PRINT_BACK: it.PRINT_BACK || "",
+          shape: it.DRUG_SHAPE || "",
+          DRUG_SHAPE: it.DRUG_SHAPE || "",
+          color: it.COLOR_CLASS1 || "",
+          COLOR_CLASS1: it.COLOR_CLASS1 || "",
+        });
+      }
+    } catch (err) {
+      console.warn("Top candidates fetch failed", err);
+    }
+  };
+
+  for (const m of uniqueMarks) {
+    await pull({ print_front: m });
+    if (color) await pull({ print_front: m, color_class1: color });
+  }
+  if (nameQ) {
+    await pull({ item_name: nameQ });
+    try {
+      const list = await searchPillList(nameQ);
+      for (const it of list) {
+        const id = String(it.itemSeq || it.id || "");
+        if (!id || map.has(id)) continue;
+        map.set(id, {
+          itemSeq: id,
+          name: it.name || "",
+          itemName: it.name || "",
+          entpName: it.entpName || "",
+          imageUrl: it.imageUrl || "",
+          tag: it.tag || "의약품",
+          mark: it.mark || "",
+          PRINT_FRONT: it.mark || "",
+          PRINT_BACK: "",
+          shape: it.shape || "",
+          DRUG_SHAPE: it.shape || "",
+          color: it.color || "",
+          COLOR_CLASS1: it.color || "",
+        });
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return Array.from(map.values()).slice(0, Math.max(topK, 10));
+}
+
+async function fetchPillIdentification({ shape, color, mark, itemName, itemSeq } = {}) {
+  const cleanMark = String(mark || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  // itemSeq lookup is exact; mark-less color/shape queries are forbidden (false positives)
+  if (!itemSeq && !itemName && cleanMark.length < 2) {
+    throw new Error("알약 각인(표기)을 읽지 못했습니다");
+  }
+
+  const query = {
+    type: "json", numOfRows: "20", pageNo: "1",
+    ...(itemSeq ? { item_seq: itemSeq } : {}),
     ...(itemName ? { item_name: itemName } : {}),
-    ...(mark ? { print_front: mark } : {}),
-    ...(color ? { color_class1: color } : {}),
-    ...(shape ? { drug_shape: shape } : {}),
-  });
+    ...(cleanMark ? { print_front: cleanMark } : {}),
+    ...(color && cleanMark ? { color_class1: color } : {}),
+    ...(shape && cleanMark ? { drug_shape: shape } : {}),
+  };
+  const json = await dataGoFetchJson("PILL_IDENTIFICATION", query);
+  const items = normalizeItems(json?.body?.items);
+  if (!items.length) throw new Error("일치하는 알약 정보를 찾을 수 없습니다");
 
-  const res = await fetch(`${API_ENDPOINTS.PILL_IDENTIFICATION}?${query.toString()}`);
-  if (!res.ok) throw new Error("낱알식별 정보 API 호출 실패");
-  const json = await res.json();
-  const item = json?.body?.items?.[0];
-  if (!item) throw new Error("일치하는 알약 정보를 찾을 수 없습니다");
+  // Exact item_seq fetch
+  if (itemSeq && !cleanMark) {
+    const item = items[0];
+    return {
+      itemSeq: item.ITEM_SEQ || item.itemSeq,
+      itemName: item.ITEM_NAME || item.itemName,
+      entpName: item.ENTP_NAME || item.entpName,
+      imageUrl: item.ITEM_IMAGE || item.itemImage,
+      chart: item.CHART,
+      tag: item.CLASS_NAME || "의약품",
+    };
+  }
 
+  const upper = cleanMark;
+  const scored = items
+    .map((it) => {
+      const front = String(it.PRINT_FRONT || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      const back = String(it.PRINT_BACK || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      let score = 0;
+      if (front === upper || back === upper) score += 100;
+      else if (front.includes(upper) || upper.includes(front) || back.includes(upper) || upper.includes(back)) {
+        const ref = front.includes(upper) || upper.includes(front) ? front : back;
+        const overlap = Math.min(upper.length, ref.length) / Math.max(upper.length, ref.length, 1);
+        score += Math.round(40 + 40 * overlap);
+      } else if (upper.length >= 3 && front.length >= 3) {
+        // prefix overlap (OCR clip)
+        let pref = 0;
+        while (pref < upper.length && pref < front.length && upper[pref] === front[pref]) pref += 1;
+        if (pref >= 2) score += 25 + pref * 5;
+      }
+      if (color && String(it.COLOR_CLASS1 || "").includes(color)) score += 15;
+      if (shape && String(it.DRUG_SHAPE || "").includes(String(shape).replace("형", ""))) score += 10;
+      return { it, score };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  // print_front query already constrained results — accept moderate imprint overlap
+  if (!scored[0] || scored[0].score < 30) {
+    throw new Error("각인이 일치하는 알약을 찾지 못했습니다");
+  }
+
+  const item = scored[0].it;
   return {
-    itemSeq: item.ITEM_SEQ,
-    itemName: item.ITEM_NAME,
-    entpName: item.ENTP_NAME,
-    imageUrl: item.ITEM_IMAGE,
+    itemSeq: item.ITEM_SEQ || item.itemSeq,
+    itemName: item.ITEM_NAME || item.itemName,
+    entpName: item.ENTP_NAME || item.entpName,
+    imageUrl: item.ITEM_IMAGE || item.itemImage,
     chart: item.CHART,
+    tag: item.CLASS_NAME || "의약품",
   };
 }
 
-// ---- 2) 의약품성분약효정보조회서비스 API : 품목기준코드 -> 약효 분류명 ----
-async function fetchDrugEfficacy(itemSeq) {
-  const query = new URLSearchParams({ serviceKey: API_KEY, type: "json", itemSeq });
-  const res = await fetch(`${API_ENDPOINTS.DRUG_EFFICACY}?${query.toString()}`);
-  if (!res.ok) throw new Error("약효분류 정보 API 호출 실패");
-  const json = await res.json();
-  const item = json?.body?.items?.[0];
-  return { efficacyTag: item?.CLASS_NAME || item?.EE_DOC_DATA || "분류 정보 없음" };
+async function fetchEasyDrugInfo(itemSeq, itemName) {
+  try {
+    const query = { type: "json", numOfRows: "1", pageNo: "1", ...(itemSeq ? { itemSeq } : {}), ...(itemName ? { itemName } : {}) };
+    const json = await dataGoFetchJson("EASY_DRUG_INFO", query);
+    const item = normalizeItems(json?.body?.items)?.[0];
+    return {
+      usageText: item?.useMethodQesitm || "복용법 정보 없음",
+      cautionText: item?.atpnWarnQesitm || item?.atpnQesitm || "주의사항 정보 없음",
+      effectText: item?.efcyQesitm || "",
+      name: item?.itemName || "",
+      imageUrl: item?.itemImage || "",
+    };
+  } catch { return { usageText: "복용법 정보 없음", cautionText: "주의사항 정보 없음", effectText: "" }; }
 }
 
-// ---- 3) 의약품안전사용서비스(DUR) API : 기존 복용약과 병용금기/중복성분 여부 ----
 async function fetchDurWarning(itemSeq, currentItemSeqs = []) {
   if (!currentItemSeqs.length) return { hasWarning: false, message: "" };
-
-  const query = new URLSearchParams({
-    serviceKey: API_KEY,
-    type: "json",
-    itemSeq,
-    itemSeqs: currentItemSeqs.join(","),
-  });
-  const res = await fetch(`${API_ENDPOINTS.DUR_INFO}?${query.toString()}`);
-  if (!res.ok) throw new Error("DUR 정보 API 호출 실패");
-  const json = await res.json();
-  const items = json?.body?.items || [];
-  if (!items.length) return { hasWarning: false, message: "" };
-
-  const messages = items
-    .map((it) =>
-      it.MIXTURE_ITEM_NAME
-        ? `${it.MIXTURE_ITEM_NAME}와(과) 병용 주의`
-        : it.PROHBT_CONTENT
-    )
-    .filter(Boolean);
-
-  return { hasWarning: messages.length > 0, message: messages.join(" · ") };
+  try {
+    const json = await dataGoFetchJson("DUR_INFO", { type: "json", itemSeq, itemSeqs: currentItemSeqs.join(",") });
+    const items = normalizeItems(json?.body?.items);
+    if (!items.length) return { hasWarning: false, message: "" };
+    const msgs = items.map((it) => it.MIXTURE_ITEM_NAME ? `${it.MIXTURE_ITEM_NAME}와(과) 병용 주의` : it.PROHBT_CONTENT).filter(Boolean);
+    return { hasWarning: msgs.length > 0, message: msgs.join(" · ") };
+  } catch { return { hasWarning: false, message: "" }; }
 }
 
-// ---- 4) 의약품 개요정보(e약은요) API : 어르신용 쉬운 복용법/주의사항 텍스트 ----
-async function fetchEasyDrugInfo(itemSeq) {
-  const query = new URLSearchParams({ serviceKey: API_KEY, type: "json", itemSeq });
-  const res = await fetch(`${API_ENDPOINTS.EASY_DRUG_INFO}?${query.toString()}`);
-  if (!res.ok) throw new Error("e약은요 정보 API 호출 실패");
-  const json = await res.json();
-  const item = json?.body?.items?.[0];
+async function fetchPillDetailBySeq(itemSeq, nameHint = "", currentSchedule = []) {
+  const currentItemSeqs = currentSchedule.map((m) => m.itemSeq).filter(Boolean);
+  const [dur, easyInfo, idnt] = await Promise.all([
+    fetchDurWarning(itemSeq, currentItemSeqs),
+    fetchEasyDrugInfo(itemSeq, nameHint),
+    fetchPillIdentification({ itemSeq, itemName: nameHint }).catch(() => null),
+  ]);
   return {
-    usageText: item?.USE_METHOD_EASY || item?.USE_METHOD_QESITM || "복용법 정보 없음",
-    cautionText: item?.ATPN_WARN_EASY || item?.ATPN_EASY || "주의사항 정보 없음",
+    id: itemSeq, itemSeq,
+    name: idnt?.itemName || easyInfo.name || nameHint || "알약",
+    tag: idnt?.tag || "의약품",
+    time: "처방 정보 확인",
+    timing: easyInfo.usageText,
+    effect: easyInfo.effectText || idnt?.tag || "정보 없음",
+    caution: dur.hasWarning ? `${easyInfo.cautionText} · [병용주의] ${dur.message}` : easyInfo.cautionText,
+    durWarning: dur.hasWarning ? dur.message : null,
+    imageUrl: idnt?.imageUrl || easyInfo.imageUrl,
+    entpName: idnt?.entpName || "",
   };
 }
 
-// ---- 데모 대체 데이터 (서비스 키 미설정 시 또는 API 호출 실패 시 사용) ----
-function findFallbackPill({ itemName } = {}) {
-  const match =
-    (itemName && MOCK_PILLS.find((p) => p.name.includes(itemName))) || MOCK_PILLS[0];
-  return match ? { ...match, itemSeq: match.id, durWarning: null } : null;
-}
-
-// ---- 파이프라인: 4개 API를 순차/병렬로 호출해 하나의 알약 데이터 객체로 병합 ----
-// 1) 낱알식별 API로 itemSeq를 먼저 확보(선행 필요) → 2~4) 나머지 3개는 병렬 호출
 async function fetchPillData(params = {}, currentSchedule = []) {
-  if (IS_DEMO_KEY) {
-    // 서비스 키가 아직 발급/설정되지 않은 상태 → 데모 데이터로 응답 (실 서비스에서는 제거)
-    await new Promise((r) => setTimeout(r, 600));
-    const fallback = findFallbackPill(params);
-    if (!fallback) throw new Error("알약 정보를 찾을 수 없습니다");
-    return fallback;
-  }
-
-  try {
-    const identification = await fetchPillIdentification(params);
-    const { itemSeq } = identification;
-    const currentItemSeqs = currentSchedule.map((m) => m.itemSeq).filter(Boolean);
-
-    const [efficacy, dur, easyInfo] = await Promise.all([
-      fetchDrugEfficacy(itemSeq).catch(() => ({ efficacyTag: "분류 정보 없음" })),
-      fetchDurWarning(itemSeq, currentItemSeqs).catch(() => ({ hasWarning: false, message: "" })),
-      fetchEasyDrugInfo(itemSeq).catch(() => ({ usageText: "", cautionText: "" })),
-    ]);
-
-    return {
-      id: itemSeq,
-      itemSeq,
-      name: identification.itemName,
-      tag: efficacy.efficacyTag,
-      time: "복용 시간대는 처방 정보를 확인해주세요",
-      timing: easyInfo.usageText,
-      effect: efficacy.efficacyTag,
-      caution: dur.hasWarning
-        ? `${easyInfo.cautionText} · [병용주의] ${dur.message}`
-        : easyInfo.cautionText,
-      durWarning: dur.hasWarning ? dur.message : null,
-      imageUrl: identification.imageUrl,
-      color: "#E3EFF7",
-    };
-  } catch (err) {
-    console.error("[fetchPillData] 공공 API 호출 실패:", err);
-    const fallback = findFallbackPill(params);
-    if (!fallback) throw new Error("알약 정보를 찾을 수 없습니다");
-    return fallback;
-  }
+  const identification = await fetchPillIdentification(params);
+  const { itemSeq } = identification;
+  const currentItemSeqs = currentSchedule.map((m) => m.itemSeq).filter(Boolean);
+  const [dur, easyInfo] = await Promise.all([
+    fetchDurWarning(itemSeq, currentItemSeqs),
+    fetchEasyDrugInfo(itemSeq, identification.itemName),
+  ]);
+  return {
+    id: itemSeq, itemSeq,
+    name: identification.itemName || easyInfo.name,
+    tag: identification.tag,
+    time: "처방 정보 확인",
+    timing: easyInfo.usageText,
+    effect: easyInfo.effectText || identification.tag,
+    caution: dur.hasWarning ? `${easyInfo.cautionText} · [병용주의] ${dur.message}` : easyInfo.cautionText,
+    durWarning: dur.hasWarning ? dur.message : null,
+    imageUrl: identification.imageUrl || easyInfo.imageUrl,
+    entpName: identification.entpName || "",
+  };
 }
-
-const MOCK_PILLS = [
-  {
-    id: 1,
-    name: "타이레놀 정 500mg",
-    tag: "진통제",
-    time: "아침, 점심, 저녁",
-    timing: "식후 30분",
-    effect: "해열 진통 / 두통, 치통, 근육통, 발열 완화",
-    caution: "간 손상 위험 · 하루 최대 8정(4,000mg) 초과 금지 · 음주 시 복용 금지",
-    color: "#F4E9E1",
-  },
-  {
-    id: 2,
-    name: "고려은단 비타민C 1000",
-    tag: "종합비타민",
-    time: "아침",
-    timing: "식후 즉시",
-    effect: "피로 회복 / 면역력 강화 및 항산화 작용",
-    caution: "위장 장애 시 식후 복용 권장 · 신장결석 병력자는 상담 후 복용",
-    color: "#FCEBC5",
-  },
-  {
-    id: 3,
-    name: "노바스크 정 5mg",
-    tag: "혈압약",
-    time: "아침",
-    timing: "식전 30분",
-    effect: "고혈압 예방 및 혈관 이완, 협심증 관리",
-    caution: "임산부 복용 금지 · 어지럼증 · 발목 부종 발생 가능 · 임의 중단 금지",
-    color: "#E3EFF7",
-  },
-];
 
 const CATEGORIES = [
-  { label: "가려움 / 습진", emoji: "🤚" },
-  { label: "두통 / 치통", emoji: "🤕" },
-  { label: "설사 / 통증", emoji: "😣" },
-  { label: "소화불량 / 위통", emoji: "🤢" },
-  { label: "근육통 / 관절통", emoji: "💪" },
-  { label: "비염 / 알레르기", emoji: "🤧" },
-  { label: "상처 / 피부", emoji: "🩹" },
-  { label: "눈 건강 / 안약", emoji: "👁️" },
-  { label: "만성질환 / 처방약", emoji: "🏥" },
-  { label: "피로회복 / 비타민", emoji: "🔋" },
-  { label: "유산균 / 장 건강", emoji: "🌀" },
+  { label: "가려움 / 물집", emoji: "🤚", q: "가려움" },
+  { label: "두통 / 치통", emoji: "🤕", q: "두통" },
+  { label: "설사통 / 통증", emoji: "😣", q: "설사" },
+  { label: "소화불량 / 위통", emoji: "🤢", q: "소화불량" },
+  { label: "근육통 / 관절통", emoji: "💪", q: "근육통" },
+  { label: "비염 / 알레르기", emoji: "🤧", q: "알레르기" },
+  { label: "상처 / 피부질환", emoji: "🩹", q: "피부" },
+  { label: "눈 건강 / 안약", emoji: "👁️", q: "안약" },
+  { label: "만성질환 / 처방약", emoji: "🏥", q: "고혈압" },
+  { label: "피로회복 / 비타민", emoji: "🔋", q: "비타민" },
+  { label: "유산균 / 장 건강", emoji: "🌀", q: "유산균" },
 ];
 
 function speak(text) {
@@ -223,20 +352,21 @@ function speak(text) {
     utter.lang = "ko-KR";
     utter.rate = 0.95;
     window.speechSynthesis.speak(utter);
-  } catch (e) {
-    console.error("TTS error", e);
-  }
+  } catch (e) { console.error("TTS error", e); }
 }
 
-function BigButton({ children, onClick, bg = NAVY, color = "#FFFFFF", className = "" }) {
+// ---- UI Components ----
+
+function Card({ children, className = "", style = {}, onClick }) {
+  const Tag = onClick ? "button" : "div";
   return (
-    <button
+    <Tag
       onClick={onClick}
-      className={`w-full min-h-[70px] rounded-2xl font-bold text-[24px] flex items-center justify-center gap-3 active:scale-[0.98] transition-transform shadow-sm ${className}`}
-      style={{ backgroundColor: bg, color }}
+      className={`bg-white rounded-2xl shadow-sm ${className}`}
+      style={{ ...style }}
     >
       {children}
-    </button>
+    </Tag>
   );
 }
 
@@ -244,11 +374,14 @@ function BottomNav({ screen, setScreen }) {
   const items = [
     { key: "home", icon: Home, label: "홈" },
     { key: "search", icon: Search, label: "약 찾기" },
-    { key: "scan", icon: Camera, label: "촬영", center: true },
+    { key: "scan", icon: Camera, label: "촬영" },
     { key: "management", icon: Clock, label: "복용관리" },
   ];
   return (
-    <div className="absolute bottom-0 left-0 right-0 bg-white border-t-2 border-gray-100 flex items-center justify-around py-2 px-1">
+    <div
+      className="absolute bottom-0 left-0 right-0 bg-white border-t flex items-center justify-around py-2"
+      style={{ borderColor: BORDER }}
+    >
       {items.map((it) => {
         const Icon = it.icon;
         const active = screen === it.key;
@@ -256,13 +389,14 @@ function BottomNav({ screen, setScreen }) {
           <button
             key={it.key}
             onClick={() => setScreen(it.key)}
-            className="flex flex-col items-center gap-0.5 py-1 px-2 min-h-[56px] justify-center"
+            className="flex flex-1 flex-col items-center justify-center gap-1 min-h-[56px] py-1"
           >
-            <Icon size={24} color={active ? NAVY : "#9CA3AF"} strokeWidth={active ? 2.75 : 2} />
-            <span
-              className="text-[12px] font-semibold"
-              style={{ color: active ? NAVY : "#9CA3AF" }}
-            >
+            <Icon
+              size={24}
+              color={active ? BLACK : GRAY}
+              strokeWidth={active ? 2.6 : 1.8}
+            />
+            <span className="text-[11px] font-medium" style={{ color: GRAY }}>
               {it.label}
             </span>
           </button>
@@ -272,112 +406,97 @@ function BottomNav({ screen, setScreen }) {
   );
 }
 
-function HomeScreen({ setScreen, setActivePill, schedule }) {
+// ---- Screens ----
+
+function HomeScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   return (
-    <div className="flex flex-col h-full overflow-y-auto pb-24">
-      <div className="px-5 pt-6 pb-3">
-        <p className="text-[26px] font-extrabold" style={{ color: "#000" }}>
-          양우진 님, 안녕하세요
-        </p>
-        <p className="text-[16px] text-gray-500 mt-1">오늘도 건강한 하루 보내세요</p>
+    <div className="flex flex-col h-full overflow-y-auto pb-24" style={{ backgroundColor: BG }}>
+      {/* Header */}
+      <div className="px-5 pt-6 pb-4 flex items-center justify-between bg-white">
+        <p className="text-[22px] font-extrabold" style={{ color: BLACK }}>양우진 님</p>
+        <span className="text-[20px]" style={{ color: GRAY }}>•••</span>
       </div>
 
-      <div className="px-5 pt-2">
-        <button
-          onClick={() => setScreen("search")}
-          className="w-full min-h-[64px] rounded-2xl border-2 flex items-center px-5 gap-3 text-left"
-          style={{ borderColor: "#D1D5DB" }}
-        >
-          <Search size={26} color="#4B5563" />
-          <span className="text-[20px] text-gray-500">약 이름을 검색해보세요</span>
-        </button>
+      <div className="px-4 pt-4">
+        {/* Search bar */}
+        <Card className="w-full flex items-center px-4 py-3 gap-3" onClick={() => setScreen("search")}>
+          <span className="text-[16px]" style={{ color: GRAY }}>검색하기</span>
+          <Search size={20} color={GRAY} className="ml-auto" />
+        </Card>
       </div>
 
-      <div className="px-5 pt-6">
-        <button
+      {/* Scan card */}
+      <div className="px-4 pt-4">
+        <Card
+          className="w-full p-5 text-left"
+          style={{ background: "linear-gradient(135deg, #E8F5E9 0%, #E3F2FD 100%)" }}
           onClick={() => setScreen("scan")}
-          className="w-full rounded-3xl p-6 text-left flex flex-col gap-4 min-h-[35vh] justify-between"
-          style={{ backgroundColor: SCAN_CARD_BG }}
         >
-          <div>
-            <p className="text-[32px] font-extrabold leading-snug" style={{ color: NAVY }}>
-              📷 알약 촬영하기
-            </p>
-            <p className="text-[18px] mt-2 leading-relaxed" style={{ color: "#3E5C78" }}>
-              카메라에 알약을 비추면
-              <br />
-              이름과 복용법을 바로 알려드려요
-            </p>
-          </div>
+          <p className="text-[22px] font-extrabold leading-snug" style={{ color: BLACK }}>알약 촬영하기</p>
+          <p className="text-[14px] mt-1 leading-relaxed" style={{ color: GRAY2 }}>
+            알약을 카메라로 촬영하면 종류와 복용 방법을 자동으로 찾아드려요.
+          </p>
           <div
-            className="w-full min-h-[70px] rounded-2xl flex items-center justify-center font-bold text-[24px]"
-            style={{ backgroundColor: SCAN_BUTTON_BG, color: "#FFFFFF" }}
+            className="mt-4 w-[160px] min-h-[44px] rounded-full flex items-center justify-center font-bold text-[16px]"
+            style={{ backgroundColor: RED, color: "#fff" }}
           >
             촬영하러 가기
           </div>
-        </button>
+        </Card>
       </div>
 
-      <div className="px-5 pt-5">
-        <button
+      {/* Management card */}
+      <div className="px-4 pt-3">
+        <Card
+          className="w-full p-5 text-left"
+          style={{ background: "linear-gradient(135deg, #F3E8FF 0%, #EDE9FE 100%)" }}
           onClick={() => setScreen("management")}
-          className="w-full rounded-3xl p-5 flex items-center gap-4"
-          style={{ backgroundColor: "#EAF6EC" }}
         >
+          <p className="text-[20px] font-extrabold" style={{ color: BLACK }}>복용 관리</p>
+          <p className="text-[14px] mt-1" style={{ color: GRAY2 }}>
+            오늘 먹을 약, 잊지 말고 챙기세요
+          </p>
           <div
-            className="w-[56px] h-[56px] rounded-2xl flex-shrink-0 flex items-center justify-center"
-            style={{ backgroundColor: "#1E8E4B" }}
+            className="mt-4 w-[160px] min-h-[44px] rounded-full flex items-center justify-center font-bold text-[16px]"
+            style={{ backgroundColor: RED, color: "#fff" }}
           >
-            <Clock size={28} color="#fff" />
+            복용 기록하기
           </div>
-
-          <div className="flex-1 text-left min-w-0">
-            <p className="text-[22px] font-extrabold text-black leading-tight">복용 관리</p>
-            <p className="text-[15px] text-gray-600 mt-1 truncate">
-              오늘 먹을 약, 잊지 말고 챙기세요
-            </p>
-          </div>
-
-          <div className="flex flex-col items-end gap-1 flex-shrink-0">
-            {schedule.length > 0 && (
-              <span
-                className="text-[13px] font-bold px-2.5 py-1 rounded-full"
-                style={{ backgroundColor: "#1E8E4B", color: "#fff" }}
-              >
-                {schedule.length}개 등록됨
-              </span>
-            )}
-            <ChevronRight size={24} color="#1E8E4B" />
-          </div>
-        </button>
+        </Card>
       </div>
 
-      <div className="px-5 pt-7">
+      {/* 자주 먹는 약 */}
+      <div className="px-4 pt-5">
         <div className="flex items-center justify-between mb-3">
-          <p className="text-[22px] font-extrabold text-black">자주 먹는 약</p>
+          <p className="text-[18px] font-extrabold" style={{ color: BLACK }}>자주 먹는 약</p>
+          <span className="text-[13px] font-semibold" style={{ color: RED }}>전체 확인</span>
         </div>
-        <div className="flex flex-col gap-3">
-          {MOCK_PILLS.map((p) => (
-            <button
+        <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-hide">
+          {schedule.length === 0 && (
+            <Card className="min-w-[140px] p-4 flex flex-col items-center justify-center gap-2">
+              <p className="text-[13px] text-center" style={{ color: GRAY }}>등록된 약이 없어요</p>
+            </Card>
+          )}
+          {schedule.map((p) => (
+            <Card
               key={p.id}
+              className="min-w-[140px] max-w-[160px] p-3 flex flex-col items-center gap-2 flex-shrink-0"
               onClick={() => {
+                setDetailSource("search");
                 setActivePill(p);
                 setScreen("detail");
               }}
-              className="w-full min-h-[80px] rounded-2xl border-2 flex items-center gap-4 px-4 py-3 text-left"
-              style={{ borderColor: "#E5E7EB" }}
             >
-              <div
-                className="w-[56px] h-[56px] rounded-xl flex-shrink-0 flex items-center justify-center text-[26px]"
-                style={{ backgroundColor: p.color }}
-              >
-                💊
+              <div className="w-[80px] h-[80px] rounded-xl overflow-hidden flex items-center justify-center" style={{ backgroundColor: "#F9FAFB" }}>
+                {p.imageUrl ? (
+                  <img src={p.imageUrl} alt={p.name} className="w-full h-full object-contain" />
+                ) : (
+                  <span className="text-[14px] font-bold" style={{ color: GRAY }}>이미지 없음</span>
+                )}
               </div>
-              <div className="flex-1">
-                <p className="text-[20px] font-bold text-black leading-tight">{p.name}</p>
-                <p className="text-[15px] text-gray-500 mt-1">{p.tag} · {p.timing}</p>
-              </div>
-            </button>
+              <p className="text-[14px] font-bold text-center leading-tight" style={{ color: BLACK }}>{p.name.length > 12 ? p.name.slice(0, 12) + "…" : p.name}</p>
+              <p className="text-[12px]" style={{ color: GRAY }}>{p.tag}</p>
+            </Card>
           ))}
         </div>
       </div>
@@ -385,485 +504,1290 @@ function HomeScreen({ setScreen, setActivePill, schedule }) {
   );
 }
 
-function SearchScreen({ setScreen, setActivePill, schedule }) {
+function SearchScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  const [results, setResults] = useState([]);
 
-  const runSearch = async (params) => {
+  const runSearch = async (name) => {
+    const q = String(name || "").trim();
+    if (!q) return;
     setErrorMsg("");
     setLoading(true);
+    setResults([]);
     try {
-      const data = await fetchPillData(params, schedule);
-      setActivePill(data);
+      const list = await searchPillList(q);
+      if (!list.length) setErrorMsg("검색 결과가 없습니다.");
+      else setResults(list);
+    } catch (err) { setErrorMsg(err.message || "검색 실패"); }
+    finally { setLoading(false); }
+  };
+
+  const openDetail = async (item) => {
+    setLoading(true);
+    try {
+      const detail = await fetchPillDetailBySeq(item.itemSeq, item.name, schedule);
+      setDetailSource("search");
+      setActivePill(detail);
       setScreen("detail");
-    } catch (err) {
-      setErrorMsg(err.message || "알약 정보를 찾을 수 없습니다");
-    } finally {
-      setLoading(false);
-    }
+    } catch {
+      setDetailSource("search");
+      setActivePill({
+        id: item.itemSeq, itemSeq: item.itemSeq, name: item.name, tag: item.tag || "의약품",
+        time: "처방 정보 확인", timing: item.timing || "복용법 정보 없음",
+        effect: item.effect || "정보 없음", caution: item.caution || "주의사항 정보 없음",
+        durWarning: null, imageUrl: item.imageUrl || "",
+      });
+      setScreen("detail");
+    } finally { setLoading(false); }
   };
 
   return (
-    <div className="flex flex-col h-full pb-24">
-      <div className="px-5 pt-6 pb-3 flex items-center gap-3">
-        <button onClick={() => setScreen("home")} className="w-[44px] h-[44px] flex items-center justify-center">
-          <ChevronLeft size={30} color="#000" />
+    <div className="flex flex-col h-full pb-24" style={{ backgroundColor: BG }}>
+      {/* Header */}
+      <div className="px-5 pt-6 pb-3 flex items-center gap-3 bg-white">
+        <button onClick={() => setScreen("home")} className="w-[40px] h-[40px] flex items-center justify-center">
+          <ChevronLeft size={28} color={BLACK} />
         </button>
-        <p className="text-[24px] font-extrabold text-black">약 찾기</p>
+        <p className="text-[20px] font-extrabold" style={{ color: BLACK }}>약 찾기</p>
       </div>
 
-      <div className="px-5">
-        <div
-          className="w-full min-h-[64px] rounded-2xl border-2 flex items-center px-4 gap-3"
-          style={{ borderColor: NAVY }}
-        >
-          <Search size={26} color={NAVY} />
+      {/* Search input */}
+      <div className="px-4 pt-3">
+        <Card className="w-full flex items-center px-4 py-3 gap-2">
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && query.trim()) runSearch({ itemName: query.trim() });
-            }}
-            placeholder="약의 이름이나 형태, 증상을 입력하세요"
-            className="flex-1 text-[19px] outline-none bg-transparent"
+            onKeyDown={(e) => { if (e.key === "Enter" && query.trim()) runSearch(query); }}
+            placeholder="약의 이름이나 형태, 증상을 입력해주세요"
+            className="flex-1 text-[15px] outline-none bg-transparent"
+            style={{ color: BLACK }}
           />
-          <button
-            onClick={() => speak("음성으로 검색해보세요")}
-            className="w-[44px] h-[44px] rounded-full flex items-center justify-center flex-shrink-0"
-            style={{ backgroundColor: "#F2F2F2" }}
-            aria-label="음성 검색"
-          >
-            🎤
+          <button onClick={() => runSearch(query)}>
+            <Search size={20} color={GRAY} />
           </button>
-        </div>
-        {loading && (
-          <p className="text-[16px] font-bold mt-2 text-center" style={{ color: NAVY }}>
-            ⏳ 알약 정보를 불러오고 있어요...
-          </p>
-        )}
-        {errorMsg && !loading && (
-          <p className="text-[16px] font-bold mt-2 text-center" style={{ color: "#C0392B" }}>
-            ⚠️ {errorMsg}
-          </p>
-        )}
+        </Card>
+        {loading && <p className="text-[14px] font-bold mt-2 text-center" style={{ color: RED }}>검색 중...</p>}
+        {errorMsg && !loading && <p className="text-[14px] mt-2 text-center" style={{ color: GRAY2 }}>{errorMsg}</p>}
       </div>
 
-      <div className="px-5 pt-6 overflow-y-auto">
-        <p className="text-[18px] font-bold text-gray-600 mb-3">증상별로 찾기</p>
-        <div className="grid grid-cols-2 gap-3">
-          {CATEGORIES.map((c) => (
-            <button
-              key={c.label}
-              onClick={() => runSearch({ itemName: c.label.split(" / ")[0] })}
-              className="min-h-[110px] rounded-2xl border-2 flex flex-col items-center justify-center gap-2 px-2 py-3"
-              style={{ borderColor: "#E5E7EB" }}
-            >
-              <span className="text-[30px]">{c.emoji}</span>
-              <span className="text-[15px] font-bold text-black text-center leading-tight">
-                {c.label}
-              </span>
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ScanScreen({ setScreen, setActivePill, schedule }) {
-  const [status, setStatus] = useState("scanning"); // scanning -> found -> loading -> error
-  const [errorMsg, setErrorMsg] = useState("");
-  const [cameraError, setCameraError] = useState("");
-  const videoRef = useRef(null);
-  const streamRef = useRef(null);
-
-  // 실제 기기 카메라 켜기
-  useEffect(() => {
-    let cancelled = false;
-    async function openCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment" },
-          audio: false,
-        });
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-        setCameraError("");
-      } catch (err) {
-        console.error("카메라 접근 실패:", err);
-        setCameraError("카메라를 사용할 수 없어요. 카메라 접근 권한을 허용해주세요.");
-      }
-    }
-    openCamera();
-    return () => {
-      cancelled = true;
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
-    };
-  }, []);
-
-  const runDetection = () => {
-    setErrorMsg("");
-    setStatus("scanning");
-    const t1 = setTimeout(() => setStatus("found"), 2600);
-    const t2 = setTimeout(async () => {
-      setStatus("loading");
-      try {
-        // 카메라 인식 결과(모양/색상/식별문자)를 4개 공공 API 파이프라인으로 전달
-        const data = await fetchPillData(
-          { shape: "원형", color: "하양", mark: "TYLENOL" },
-          schedule
-        );
-        setActivePill(data);
-        setScreen("detail");
-      } catch (err) {
-        setStatus("error");
-        setErrorMsg(err.message || "알약 정보를 찾을 수 없습니다");
-      }
-    }, 3600);
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-    };
-  };
-
-  useEffect(() => {
-    const cleanup = runDetection();
-    return cleanup;
-  }, []);
-
-  return (
-    <div className="flex flex-col h-full" style={{ backgroundColor: "#0B0F14" }}>
-      <div className="px-5 pt-6 flex items-center gap-3">
-        <button onClick={() => setScreen("home")} className="w-[44px] h-[44px] flex items-center justify-center">
-          <ChevronLeft size={30} color="#fff" />
-        </button>
-        <p className="text-[20px] font-bold text-white">알약을 화면 중앙에 놓아주세요</p>
-      </div>
-
-      <div className="flex-1 flex items-center justify-center relative overflow-hidden">
-        {/* 실제 카메라 라이브 뷰 (화면 전체 배경) */}
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          className="absolute inset-0 w-full h-full object-cover"
-        />
-        {/* 카메라를 못 켤 때의 대체 배경 */}
-        {cameraError && (
-          <div className="absolute inset-0 flex items-center justify-center px-8" style={{ backgroundColor: "#0B0F14" }}>
-            <p className="text-[16px] text-gray-300 text-center leading-relaxed">📷 {cameraError}</p>
+      {/* Categories or results */}
+      {!results.length && !loading ? (
+        <div className="px-4 pt-4 overflow-y-auto">
+          <div className="grid grid-cols-3 gap-3">
+            {CATEGORIES.map((c) => (
+              <Card
+                key={c.label}
+                className="flex flex-col items-center justify-center gap-2 py-4 px-2"
+                onClick={() => { setQuery(c.q); runSearch(c.q); }}
+              >
+                <span className="text-[32px]">{c.emoji}</span>
+                <span className="text-[12px] font-bold text-center leading-tight" style={{ color: BLACK }}>{c.label}</span>
+              </Card>
+            ))}
           </div>
-        )}
-
-        {/* 스캔 프레임 오버레이 */}
-        <div
-          className="w-[260px] h-[260px] rounded-3xl relative flex items-center justify-center"
-          style={{
-            border: `4px solid ${
-              status === "error" ? "#E5484D" : status === "found" || status === "loading" ? "#3ADB76" : YELLOW
-            }`,
-            boxShadow: `0 0 0 2000px rgba(0,0,0,0.45)`,
-          }}
-        >
-          {(status === "found" || status === "loading" || status === "error") && (
-            <span className="text-[70px]">{status === "error" ? "⚠️" : "✅"}</span>
-          )}
-          {status === "scanning" && (
-            <div
-              className="absolute left-2 right-2 h-[3px] rounded"
-              style={{ backgroundColor: YELLOW, animation: "scanline 1.4s linear infinite" }}
-            />
-          )}
         </div>
-      </div>
-
-      <div className="px-5 pb-12">
-        {status !== "error" ? (
-          <div
-            className="w-full min-h-[70px] rounded-2xl flex items-center justify-center font-bold text-[22px] gap-2 text-center"
-            style={{
-              backgroundColor: status === "found" || status === "loading" ? "#1E8E4B" : "#1F2937",
-              color: "#fff",
-            }}
-          >
-            {status === "scanning" && "🔍 실시간으로 알약을 인식하고 있어요..."}
-            {status === "found" && "✅ 알약을 인식했어요!"}
-            {status === "loading" && "⏳ 알약 정보를 불러오고 있어요..."}
-          </div>
-        ) : (
-          <div className="flex flex-col gap-3">
-            <div
-              className="w-full min-h-[70px] rounded-2xl flex items-center justify-center font-bold text-[20px] px-4 text-center"
-              style={{ backgroundColor: "#3A1518", color: "#FF9FA3" }}
-            >
-              ⚠️ {errorMsg}
-            </div>
-            <BigButton bg={YELLOW} color={NAVY} onClick={runDetection}>
-              다시 촬영하기
-            </BigButton>
-          </div>
-        )}
-      </div>
-
-      <style>{`
-        @keyframes scanline {
-          0% { top: 8px; }
-          50% { top: 240px; }
-          100% { top: 8px; }
-        }
-      `}</style>
-    </div>
-  );
-}
-
-function TTSBlock({ label, content, icon }) {
-  const [active, setActive] = useState(false);
-  return (
-    <button
-      onClick={() => {
-        speak(`${label}. ${content}`);
-        setActive(true);
-        setTimeout(() => setActive(false), 900);
-      }}
-      className="w-full min-h-[110px] rounded-2xl px-5 py-4 flex flex-col gap-2 text-left border-2 transition-colors"
-      style={{
-        borderColor: active ? NAVY : "#E5E7EB",
-        backgroundColor: active ? "#F3F8FC" : "#FFFFFF",
-      }}
-    >
-      <div className="flex items-center justify-between">
-        <span className="text-[19px] font-extrabold" style={{ color: NAVY }}>
-          {icon} {label}
-        </span>
-        <Volume2 size={26} color={NAVY} />
-      </div>
-      <span className="text-[22px] font-bold text-black leading-snug">{content}</span>
-    </button>
-  );
-}
-
-function DetailScreen({ setScreen, pill, addToSchedule }) {
-  const [registered, setRegistered] = useState(false);
-
-  // 인식 결과가 뜨는 즉시 이름 / 종류 / 복용 시간을 자동으로 음성 안내
-  useEffect(() => {
-    if (!pill) return;
-    const intro = `${pill.name}. ${pill.tag}. ${pill.time} / ${pill.timing} 복용`;
-    const t = setTimeout(() => speak(intro), 400);
-    return () => clearTimeout(t);
-  }, [pill?.id, pill?.name]);
-
-  if (!pill) return null;
-  return (
-    <div className="flex flex-col h-full overflow-y-auto pb-28">
-      <div className="px-5 pt-6 pb-2 flex items-center gap-3">
-        <button onClick={() => setScreen("home")} className="w-[44px] h-[44px] flex items-center justify-center">
-          <ChevronLeft size={30} color="#000" />
-        </button>
-        <p className="text-[18px] font-bold text-gray-500">알약 인식 결과</p>
-      </div>
-
-      <div className="px-5 pt-2 flex flex-col items-center">
-        <div
-          className="w-full h-[180px] rounded-3xl flex items-center justify-center text-[70px] overflow-hidden"
-          style={{ backgroundColor: pill.color }}
-        >
-          {pill.imageUrl ? (
-            <img src={pill.imageUrl} alt={pill.name} className="w-full h-full object-contain" />
-          ) : (
-            "💊"
-          )}
-        </div>
-        <p className="text-[34px] font-extrabold text-black mt-5 text-center leading-tight">
-          {pill.name}
-        </p>
-        <span
-          className="text-[16px] font-bold px-3 py-1 rounded-full mt-2"
-          style={{ backgroundColor: NAVY, color: "#fff" }}
-        >
-          {pill.tag}
-        </span>
-      </div>
-
-      <div className="px-5 pt-6 flex flex-col gap-3">
-        <TTSBlock
-          label="복용법 및 시간대"
-          icon="⏰"
-          content={`${pill.time} / ${pill.timing} 복용`}
-        />
-        <TTSBlock label="약효 및 성분" icon="💊" content={pill.effect} />
-        <TTSBlock label="주의사항" icon="⚠️" content={pill.caution} />
-        {pill.durWarning && (
-          <TTSBlock label="병용 금기 경고 (DUR)" icon="🚫" content={pill.durWarning} />
-        )}
-      </div>
-
-      <div className="px-5 pt-6">
-        <BigButton
-          bg={registered ? "#1E8E4B" : NAVY}
-          onClick={() => {
-            addToSchedule(pill);
-            setRegistered(true);
-            speak("복용 관리에 등록되었습니다");
-          }}
-        >
-          {registered ? (
-            <>
-              <Check size={26} /> 복용 관리에 등록됨
-            </>
-          ) : (
-            <>
-              <AlarmClock size={26} /> 복용 관리 등록하기
-            </>
-          )}
-        </BigButton>
-      </div>
-    </div>
-  );
-}
-
-function ManagementScreen({ setScreen, schedule }) {
-  const [ocrDone, setOcrDone] = useState(false);
-  const [takenIds, setTakenIds] = useState([]);
-
-  const toggleTaken = (id) => {
-    setTakenIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  };
-
-  const takenCount = schedule.filter((p) => takenIds.includes(p.id)).length;
-
-  return (
-    <div className="flex flex-col h-full overflow-y-auto pb-24" style={{ backgroundColor: "#FAFAFA" }}>
-      <div className="px-5 pt-6 pb-3 flex items-center gap-3 bg-white">
-        <button onClick={() => setScreen("home")} className="w-[44px] h-[44px] flex items-center justify-center">
-          <ChevronLeft size={30} color="#000" />
-        </button>
-        <p className="text-[26px] font-extrabold text-black">복용 관리</p>
-      </div>
-
-      {/* 진행 요약 */}
-      {schedule.length > 0 && (
-        <div className="px-5 pt-4">
-          <div
-            className="w-full rounded-2xl px-5 py-4 flex items-center justify-between"
-            style={{ backgroundColor: NAVY }}
-          >
-            <p className="text-[18px] font-bold text-white">오늘의 복용 현황</p>
-            <p className="text-[22px] font-extrabold" style={{ color: YELLOW }}>
-              {takenCount} / {schedule.length}
-            </p>
+      ) : (
+        <div className="px-4 pt-3 overflow-y-auto flex-1">
+          <p className="text-[13px] font-bold mb-2" style={{ color: GRAY }}>검색 결과 {results.length}건</p>
+          <div className="flex flex-col gap-2 pb-4">
+            {results.map((p) => (
+              <Card key={p.id} className="w-full flex items-center gap-3 px-3 py-3 text-left" onClick={() => openDetail(p)}>
+                <div className="w-[56px] h-[56px] rounded-xl flex-shrink-0 overflow-hidden flex items-center justify-center" style={{ backgroundColor: "#F9FAFB" }}>
+                  {p.imageUrl ? (
+                    <img src={p.imageUrl} alt={p.name} className="w-full h-full object-contain" />
+                  ) : (
+                    <span className="text-[12px] font-bold" style={{ color: GRAY }}>약</span>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[15px] font-bold leading-tight" style={{ color: BLACK }}>{p.name}</p>
+                  <p className="text-[12px] mt-0.5 truncate" style={{ color: GRAY }}>{[p.entpName, p.tag].filter(Boolean).join(" · ")}</p>
+                </div>
+                <ChevronRight size={18} color={GRAY} />
+              </Card>
+            ))}
           </div>
         </div>
       )}
+    </div>
+  );
+}
 
-      {/* 처방전 OCR 등록 카드 */}
-      <div className="px-5 pt-4">
-        <div className="w-full rounded-2xl bg-white border-2 px-4 py-4" style={{ borderColor: "#EEEEEE" }}>
-          <p className="text-[15px] text-gray-500 mb-3">
-            처방전이나 약봉지 사진 한 장이면 자동으로 등록돼요
+function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
+  const [status, setStatus] = useState("scanning"); // scanning | loading | results | error
+  const [errorMsg, setErrorMsg] = useState("");
+  const [cameraError, setCameraError] = useState("");
+  const [manualMark, setManualMark] = useState("");
+  const [detectedMarks, setDetectedMarks] = useState([]);
+  const [foundPills, setFoundPills] = useState([]);
+  const [pillBoxes, setPillBoxes] = useState([]);
+  const [debugMode, setDebugMode] = useState(false);
+  const [debugInfo, setDebugInfo] = useState(null);
+  const [metricsSnap, setMetricsSnap] = useState(null);
+  const [dualMode, setDualMode] = useState(false); // front+back fusion
+  const [frontCrop, setFrontCrop] = useState(null);
+  const [captureSide, setCaptureSide] = useState("front"); // front | back
+  const cancelledRef = useRef(false);
+  const processingRef = useRef(false);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const canvasRef = useRef(null);
+
+  const stopCamera = () => {
+    if (!streamRef.current) return;
+    streamRef.current.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  };
+
+  const openCamera = async () => {
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      setCameraError("카메라를 지원하지 않는 브라우저입니다.");
+      return false;
+    }
+    if (!window.isSecureContext) {
+      setCameraError("HTTPS 또는 localhost에서만 카메라를 사용할 수 있습니다.");
+      return false;
+    }
+    setCameraError("");
+    stopCamera();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        try {
+          await videoRef.current.play();
+        } catch {}
+      }
+      return true;
+    } catch {
+      setCameraError("카메라 권한을 허용해주세요.");
+      return false;
+    }
+  };
+
+  useEffect(() => {
+    cancelledRef.current = false;
+    openCamera();
+    return () => {
+      cancelledRef.current = true;
+      stopCamera();
+      terminateOcrWorker();
+    };
+  }, []);
+
+  // Higher-res capture for multi-scale detection (640/960/1280)
+  const captureFrame = () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight) return null;
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const crop = Math.min(vw, vh) * 0.9;
+    const sx = (vw - crop) / 2;
+    const sy = (vh - crop) / 2;
+    const out = 960;
+
+    if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
+    const canvas = canvasRef.current;
+    canvas.width = out;
+    canvas.height = out;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(video, sx, sy, crop, crop, 0, 0, out, out);
+    return canvas;
+  };
+
+  const boxesFromDetections = (detections, frameW, frameH) =>
+    (detections || []).map((d) => ({
+      left: (d.box.x / frameW) * 100,
+      top: (d.box.y / frameH) * 100,
+      width: (d.box.w / frameW) * 100,
+      height: (d.box.h / frameH) * 100,
+      confidence: d.confidence,
+      mark: d.mark,
+      shape: d.shape,
+      cropUrl: debugMode && d.cropCanvas ? d.cropCanvas.toDataURL("image/jpeg", 0.6) : null,
+      maskUrl: debugMode && d.maskCanvas ? d.maskCanvas.toDataURL("image/png") : null,
+    }));
+
+  const candidateFetcher = async (features) =>
+    fetchPillTopCandidates({
+      mark: features.mark,
+      color: features.color,
+      shape: features.shape,
+      markCandidates: features.markCandidates,
+      itemName: features.itemName,
+    }, 10);
+
+  const finalizePipelineResults = async (pipelineResult) => {
+    processingRef.current = true;
+    setStatus("loading");
+
+    // Only accept hits with imprint-matched best (blocks color-only false positives)
+    const hits = (pipelineResult.results || []).filter(
+      (r) => r.best && (r.fusedConfidence ?? r.best.fusedScore ?? 0) >= 0.35
+    );
+    const marks = [...new Set(hits.map((r) => r.mark).filter(Boolean))];
+    setDetectedMarks(marks);
+
+    if (debugMode) {
+      setDebugInfo(pipelineResult.debug);
+      setMetricsSnap(formatMetricsSummary(getMetrics()));
+    }
+
+    if (!hits.length) {
+      processingRef.current = false;
+      return false;
+    }
+
+    try {
+      const settled = await Promise.allSettled(
+        hits.map(async (r) => {
+          const best = r.best;
+          const seq = best.itemSeq || best.ITEM_SEQ;
+          if (seq) {
+            const detail = await fetchPillDetailBySeq(seq, best.name || best.itemName, schedule);
+            return { ...detail, detectedMark: r.mark, rerankScore: best.rerankScore };
+          }
+          return fetchPillData(
+            { mark: r.mark, color: r.color, shape: r.shape },
+            schedule
+          ).then((p) => ({ ...p, detectedMark: r.mark }));
+        })
+      );
+      if (cancelledRef.current) return true;
+
+      const pills = [];
+      const seen = new Set();
+      for (const res of settled) {
+        if (res.status !== "fulfilled" || !res.value) continue;
+        const pill = res.value;
+        const key = String(pill.itemSeq || pill.id);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        pills.push(pill);
+      }
+
+      if (!pills.length) {
+        processingRef.current = false;
+        return false;
+      }
+
+      if (pills.length === 1) {
+        setStatus("found");
+        setDetailSource("scan");
+        setActivePill(pills[0]);
+        setScreen("detail");
+        return true;
+      }
+
+      setFoundPills(pills);
+      setStatus("results");
+      stopCamera();
+      return true;
+    } catch (err) {
+      if (cancelledRef.current) return true;
+      setStatus("error");
+      setErrorMsg(err.message || "알약을 찾을 수 없습니다");
+      return true;
+    }
+  };
+
+  const lookupMarks = async (detections) => {
+    processingRef.current = true;
+    setStatus("loading");
+    const list = Array.isArray(detections)
+      ? detections.map((d) => (typeof d === "string" ? { mark: d, color: "" } : d))
+      : [];
+    const marks = list.map((d) => d.mark);
+    setDetectedMarks(marks);
+
+    try {
+      const settled = await Promise.allSettled(
+        list
+          .filter((d) => d.mark && String(d.mark).replace(/[^A-Za-z0-9]/g, "").length >= 2)
+          .map((d) =>
+            fetchPillData(
+              {
+                mark: d.mark,
+                ...(d.color ? { color: d.color } : {}),
+              },
+              schedule
+            )
+          )
+      );
+      if (cancelledRef.current) return;
+
+      const pills = [];
+      const seen = new Set();
+      settled.forEach((res, idx) => {
+        if (res.status !== "fulfilled" || !res.value) return;
+        const pill = res.value;
+        const key = String(pill.itemSeq || pill.id || marks[idx]);
+        if (seen.has(key)) return;
+        seen.add(key);
+        pills.push({ ...pill, detectedMark: marks[idx] });
+      });
+
+      if (!pills.length) {
+        setStatus("error");
+        setErrorMsg("인식된 표기로 약을 찾지 못했습니다. 직접 입력해보세요.");
+        return;
+      }
+
+      if (pills.length === 1) {
+        setStatus("found");
+        setDetailSource("scan");
+        setActivePill(pills[0]);
+        setScreen("detail");
+        return;
+      }
+
+      setFoundPills(pills);
+      setStatus("results");
+      stopCamera();
+    } catch (err) {
+      if (cancelledRef.current) return;
+      setStatus("error");
+      setErrorMsg(err.message || "알약을 찾을 수 없습니다");
+    }
+  };
+
+  const runManualSearch = async () => {
+    const manual = String(manualMark || "").trim();
+    if (!manual) return;
+    setErrorMsg("");
+    const marks = manual
+      .toUpperCase()
+      .split(/[\s,./|]+/)
+      .map((m) => m.trim())
+      .filter((m) => m.length >= 2);
+    await lookupMarks(marks.length ? marks.map((m) => ({ mark: m, color: "" })) : [{ mark: manual, color: "" }]);
+  };
+
+  const openPill = (pill) => {
+    setDetailSource("scan");
+    setActivePill(pill);
+    setScreen("detail");
+  };
+
+  const [resumeKey, setResumeKey] = useState(0);
+
+  const resumeScanning = async () => {
+    setFoundPills([]);
+    setDetectedMarks([]);
+    setPillBoxes([]);
+    setDebugInfo(null);
+    setErrorMsg("");
+    setManualMark("");
+    setFrontCrop(null);
+    setCaptureSide("front");
+    processingRef.current = false;
+    setStatus("scanning");
+    await openCamera();
+    setResumeKey((k) => k + 1);
+  };
+
+  // Detection → Classification → Re-rank pipeline loop
+  useEffect(() => {
+    if (cameraError) return;
+
+    cancelledRef.current = false;
+    processingRef.current = false;
+    setStatus("scanning");
+    setDetectedMarks([]);
+    setPillBoxes([]);
+    setErrorMsg("");
+
+    let timerId = null;
+    let stopped = false;
+    let emptyTries = 0;
+    let totalTries = 0;
+    let lastMarkKey = "";
+    let confirmCount = 0;
+
+    const fail = (msg) => {
+      stopped = true;
+      processingRef.current = true;
+      setStatus("error");
+      setErrorMsg(msg);
+      setDetectedMarks([]);
+    };
+
+    const tick = async () => {
+      if (stopped || cancelledRef.current || processingRef.current) return;
+      if (!videoRef.current?.videoWidth) {
+        timerId = setTimeout(tick, 150);
+        return;
+      }
+
+      const frame = captureFrame();
+      if (!frame) {
+        timerId = setTimeout(tick, 150);
+        return;
+      }
+
+      totalTries += 1;
+      if (totalTries > 14) {
+        fail("알약 인식에 실패했습니다. 각인(글자)이 보이게 가까이 찍거나, 표기를 직접 입력해주세요.");
+        return;
+      }
+
+      try {
+        let pipelineResult = await runVisionSearch(frame, {
+          candidateFetcher,
+          bagHints: getSessionBagHints(),
+          frontBack: null,
+          debug: debugMode,
+          maxInstances: 6,
+          shareByEmbedding: true,
+          scales: [640, 960],
+          minConfidenceKeep: 0.2,
+          twoPass: true,
+          topK: 10,
+        });
+
+        // Dual-side fusion: once front is saved, re-run with front+back crops
+        if (dualMode && frontCrop && pipelineResult.results?.[0]?.cropCanvas) {
+          pipelineResult = await runVisionSearch(frame, {
+            candidateFetcher,
+            bagHints: getSessionBagHints(),
+            frontBack: {
+              frontCanvas: frontCrop,
+              backCanvas: pipelineResult.results[0].cropCanvas,
+            },
+            debug: debugMode,
+            maxInstances: 1,
+            shareByEmbedding: false,
+            scales: [640, 960],
+            topK: 10,
+          });
+        }
+        if (stopped || cancelledRef.current || processingRef.current) return;
+
+        const dets = pipelineResult.results || [];
+        setPillBoxes(boxesFromDetections(dets, frame.width, frame.height));
+        if (debugMode) {
+          setDebugInfo(pipelineResult.debug);
+          setMetricsSnap(formatMetricsSummary(getMetrics()));
+        }
+
+        const withMark = dets.filter((d) => d.mark && d.mark.length >= 2);
+        const withBest = dets.filter(
+          (d) => d.best && (d.fusedConfidence ?? d.best.fusedScore ?? 0) >= 0.35
+        );
+
+        if (withMark.length) {
+          setDetectedMarks([...new Set(withMark.map((d) => d.mark))]);
+        }
+
+        // Dual-side: stash front crop once, then search with front+back fusion
+        if (dualMode && !frontCrop && dets[0]?.cropCanvas) {
+          const c = document.createElement("canvas");
+          c.width = dets[0].cropCanvas.width;
+          c.height = dets[0].cropCanvas.height;
+          c.getContext("2d").drawImage(dets[0].cropCanvas, 0, 0);
+          setFrontCrop(c);
+          setCaptureSide("back");
+          timerId = setTimeout(tick, 400);
+          return;
+        }
+
+        if (!withMark.length && !withBest.length) {
+          emptyTries += 1;
+          lastMarkKey = "";
+          confirmCount = 0;
+          if (emptyTries >= 8) {
+            fail("알약 각인(표기)을 읽지 못했습니다. 글자가 선명하게 보이게 찍거나 직접 입력해주세요.");
+            return;
+          }
+          timerId = setTimeout(tick, 220);
+          return;
+        }
+
+        emptyTries = 0;
+        const key = (withBest.length ? withBest : withMark)
+          .map((d) => d.mark)
+          .filter(Boolean)
+          .sort()
+          .join("|");
+
+        if (key && key === lastMarkKey) confirmCount += 1;
+        else {
+          lastMarkKey = key;
+          confirmCount = 1;
+        }
+
+        // withBest: accept on first solid match; mark-only: need 2 frames
+        const needConfirm = withBest.length ? 1 : 2;
+        if (confirmCount < needConfirm) {
+          timerId = setTimeout(tick, 240);
+          return;
+        }
+
+        if (withBest.length) {
+          const ok = await finalizePipelineResults(pipelineResult);
+          if (!ok && !stopped && !cancelledRef.current) {
+            processingRef.current = false;
+            confirmCount = 0;
+            lastMarkKey = "";
+            timerId = setTimeout(tick, 260);
+          }
+          return;
+        }
+
+        if (withMark.length) {
+          await lookupMarks(withMark.map((d) => ({ mark: d.mark, color: d.color || "" })));
+          return;
+        }
+
+        timerId = setTimeout(tick, 260);
+      } catch (err) {
+        console.warn("pipeline tick error", err);
+        if (!stopped && !cancelledRef.current && !processingRef.current) {
+          timerId = setTimeout(tick, 280);
+        }
+      }
+    };
+
+    timerId = setTimeout(tick, 280);
+
+    return () => {
+      stopped = true;
+      if (timerId) clearTimeout(timerId);
+    };
+  }, [cameraError, resumeKey, debugMode, dualMode, frontCrop]);
+
+  const statusText = {
+    scanning: "알약을 인식하고 있어요",
+    loading: "약 정보를 불러오고 있어요",
+    found: "알약을 인식했어요",
+    results: `${foundPills.length}개 알약을 찾았어요`,
+    error: errorMsg,
+  }[status];
+
+  if (status === "results") {
+    return (
+      <div className="flex flex-col h-full pb-6" style={{ backgroundColor: BG }}>
+        <div className="px-4 pt-5 pb-3 flex items-center gap-3 bg-white">
+          <button onClick={() => setScreen("home")} className="w-[40px] h-[40px] flex items-center justify-center">
+            <ChevronLeft size={28} color={BLACK} />
+          </button>
+          <p className="text-[18px] font-extrabold" style={{ color: BLACK }}>인식된 알약</p>
+        </div>
+
+        <div className="px-4 pt-3">
+          <p className="text-[14px] font-bold mb-3" style={{ color: GRAY2 }}>
+            {foundPills.length}개를 찾았습니다. 확인할 약을 선택하세요.
           </p>
-          <BigButton
-            bg="#F5F5F5"
-            color={NAVY}
-            onClick={() => {
-              setOcrDone(true);
-              speak("처방전에서 약 세 종류가 자동으로 등록되었습니다");
-            }}
+          <div className="flex flex-col gap-2 overflow-y-auto" style={{ maxHeight: "560px" }}>
+            {foundPills.map((p) => (
+              <Card key={p.id} className="w-full flex items-center gap-3 px-3 py-3 text-left" onClick={() => openPill(p)}>
+                <div className="w-[56px] h-[56px] rounded-xl flex-shrink-0 overflow-hidden flex items-center justify-center" style={{ backgroundColor: "#F9FAFB" }}>
+                  {p.imageUrl ? (
+                    <img src={p.imageUrl} alt={p.name} className="w-full h-full object-contain" />
+                  ) : (
+                    <span className="text-[12px] font-bold" style={{ color: GRAY }}>약</span>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[15px] font-bold leading-tight" style={{ color: BLACK }}>{p.name}</p>
+                  <p className="text-[12px] mt-0.5 truncate" style={{ color: GRAY }}>
+                    {[p.detectedMark && `표기 ${p.detectedMark}`, p.tag].filter(Boolean).join(" · ")}
+                  </p>
+                </div>
+                <ChevronRight size={18} color={GRAY} />
+              </Card>
+            ))}
+          </div>
+          <button
+            onClick={resumeScanning}
+            className="w-full min-h-[48px] rounded-full font-bold text-[16px] mt-4"
+            style={{ backgroundColor: RED, color: "#fff" }}
           >
-            <FileText size={26} color={NAVY} /> 처방전 / 약봉지로 등록
-          </BigButton>
-          {ocrDone && (
-            <p className="text-[15px] text-center mt-3 font-bold" style={{ color: "#1E8E4B" }}>
-              ✅ 처방전에서 약 3종이 자동 등록되었습니다
-            </p>
-          )}
+            다시 인식하기
+          </button>
         </div>
       </div>
+    );
+  }
 
-      {/* 등록된 약 목록 */}
-      <div className="px-5 pt-6">
-        <p className="text-[18px] font-bold text-gray-500 mb-3">
-          등록된 약 {schedule.length > 0 ? `${schedule.length}개` : ""}
-        </p>
+  return (
+    <div className="flex flex-col h-full" style={{ backgroundColor: "#000" }}>
+      <div className="px-4 pt-5 pb-3 flex items-center gap-3">
+        <button onClick={() => setScreen("home")} className="w-[40px] h-[40px] flex items-center justify-center">
+          <ChevronLeft size={28} color="#fff" />
+        </button>
+        <p className="text-[18px] font-bold text-white flex-1">알약 촬영</p>
+        <button
+          onClick={() => {
+            setDualMode((v) => !v);
+            setFrontCrop(null);
+            setCaptureSide("front");
+          }}
+          className="min-h-[32px] px-3 rounded-full text-[12px] font-bold mr-2"
+          style={{
+            backgroundColor: dualMode ? "#60A5FA" : "rgba(255,255,255,0.2)",
+            color: dualMode ? "#0C4A6E" : "#fff",
+          }}
+        >
+          {dualMode ? (captureSide === "back" ? "뒷면" : "앞면+") : "단면"}
+        </button>
+        <button
+          onClick={() => setDebugMode((v) => !v)}
+          className="min-h-[32px] px-3 rounded-full text-[12px] font-bold"
+          style={{
+            backgroundColor: debugMode ? "#34D399" : "rgba(255,255,255,0.2)",
+            color: debugMode ? "#064E3B" : "#fff",
+          }}
+        >
+          Debug
+        </button>
+      </div>
 
-        {schedule.length === 0 ? (
-          <div className="w-full rounded-2xl bg-white border-2 flex flex-col items-center justify-center gap-2 py-10 px-4" style={{ borderColor: "#EEEEEE" }}>
-            <span className="text-[40px]">💊</span>
-            <p className="text-[17px] text-gray-500 text-center leading-relaxed">
-              아직 등록된 약이 없어요.
-              <br />
-              알약을 촬영하고 복용 관리에 등록해보세요.
-            </p>
+      <div className="flex-1 relative overflow-hidden">
+        <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover" />
+        {cameraError ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 px-8" style={{ backgroundColor: BG }}>
+            <p className="text-[15px] text-center leading-relaxed" style={{ color: BLACK }}>{cameraError}</p>
+            <button
+              onClick={openCamera}
+              className="min-h-[44px] px-5 rounded-full font-bold text-[15px]"
+              style={{ backgroundColor: RED, color: "#fff" }}
+            >
+              다시 시도
+            </button>
           </div>
         ) : (
-          <div className="flex flex-col gap-3">
-            {schedule.map((p) => {
-              const taken = takenIds.includes(p.id);
-              return (
-                <div
-                  key={p.id}
-                  className="w-full rounded-2xl bg-white flex items-center gap-3 px-4 py-4"
-                  style={{
-                    boxShadow: "0 1px 4px rgba(0,0,0,0.06)",
-                    opacity: taken ? 0.6 : 1,
-                  }}
-                >
-                  <div
-                    className="w-[52px] h-[52px] rounded-xl flex-shrink-0 flex items-center justify-center text-[24px]"
-                    style={{ backgroundColor: p.color }}
+          <div
+            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[280px] h-[280px] rounded-3xl overflow-hidden"
+            style={{
+              border: `3px solid ${status === "loading" ? "#34D399" : "rgba(255,255,255,0.75)"}`,
+              boxShadow: "0 0 0 9999px rgba(0,0,0,0.4)",
+            }}
+          >
+            {pillBoxes.map((box, i) => (
+              <div
+                key={i}
+                className="absolute rounded-lg"
+                style={{
+                  left: `${box.left}%`,
+                  top: `${box.top}%`,
+                  width: `${box.width}%`,
+                  height: `${box.height}%`,
+                  border: "2px solid #34D399",
+                  backgroundColor: "rgba(52, 211, 153, 0.15)",
+                }}
+              >
+                {debugMode && (
+                  <span
+                    className="absolute -top-5 left-0 text-[10px] font-bold px-1 rounded"
+                    style={{ backgroundColor: "rgba(0,0,0,0.7)", color: "#34D399", whiteSpace: "nowrap" }}
                   >
-                    💊
-                  </div>
+                    {(box.confidence * 100).toFixed(0)}% {box.shape || ""} {box.mark || ""}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
 
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[19px] font-bold text-black leading-tight truncate">{p.name}</p>
-                    <p className="text-[14px] text-gray-500 mt-1">
-                      {p.time} · {p.timing}
-                    </p>
-                  </div>
-
-                  <button
-                    onClick={() => speak(`${p.name}, ${p.time}, ${p.timing} 복용`)}
-                    className="w-[44px] h-[44px] rounded-full flex-shrink-0 flex items-center justify-center"
-                    style={{ backgroundColor: "#F2F2F2" }}
-                    aria-label="음성으로 듣기"
-                  >
-                    <Volume2 size={20} color={NAVY} />
-                  </button>
-
-                  <button
-                    onClick={() => toggleTaken(p.id)}
-                    className="min-h-[44px] px-3 rounded-xl flex-shrink-0 flex items-center justify-center gap-1 font-bold text-[14px]"
-                    style={{
-                      backgroundColor: taken ? "#EAF6EC" : NAVY,
-                      color: taken ? "#1E8E4B" : "#fff",
-                    }}
-                  >
-                    {taken ? (
-                      <>
-                        <Check size={16} /> 완료
-                      </>
-                    ) : (
-                      "체크"
-                    )}
-                  </button>
+        {debugMode && (pillBoxes.some((b) => b.cropUrl) || metricsSnap) && (
+          <div
+            className="absolute left-2 right-2 bottom-2 rounded-xl p-2 overflow-x-auto"
+            style={{ backgroundColor: "rgba(0,0,0,0.72)", maxHeight: "120px" }}
+          >
+            {metricsSnap && (
+              <p className="text-[10px] text-white/80 mb-1">
+                {Object.entries(metricsSnap)
+                  .map(([k, v]) => `${k}: ${v}`)
+                  .join(" · ")}
+              </p>
+            )}
+            <div className="flex gap-2">
+              {pillBoxes.filter((b) => b.cropUrl).map((b, i) => (
+                <div key={i} className="flex-shrink-0 text-center">
+                  <img src={b.cropUrl} alt={`crop-${i}`} className="w-14 h-14 object-cover rounded border border-emerald-400" />
+                  {b.maskUrl && (
+                    <img src={b.maskUrl} alt={`mask-${i}`} className="w-14 h-8 object-cover rounded mt-1 opacity-80" />
+                  )}
+                  <p className="text-[9px] text-emerald-300 mt-0.5">{(b.confidence * 100).toFixed(0)}%</p>
                 </div>
-              );
-            })}
+              ))}
+            </div>
           </div>
         )}
       </div>
+
+      <div className="px-5 py-4" style={{ backgroundColor: CARD }}>
+        {status !== "error" ? (
+          <div className="text-center">
+            <p className="text-[15px] font-bold" style={{ color: BLACK }}>{statusText}</p>
+            {detectedMarks.length > 0 && (status === "scanning" || status === "loading") && (
+              <p className="text-[12px] mt-1" style={{ color: GRAY }}>
+                읽은 표기: {detectedMarks.join(", ")}
+              </p>
+            )}
+            {status === "scanning" && (
+              <p className="text-[12px] mt-2 leading-relaxed" style={{ color: GRAY2 }}>
+                {dualMode
+                  ? captureSide === "back"
+                    ? "앞면을 저장했습니다. 이제 뒷면 각인을 맞춰 주세요"
+                    : "앞면+뒷면 모드: 먼저 앞면 각인을 맞춰 주세요"
+                  : "Vision Search: 알약 글자(각인)가 선명하게 보이도록 가까이 맞춰 주세요"}
+              </p>
+            )}
+          </div>
+        ) : (
+          <div>
+            <p className="text-[14px] text-center mb-3" style={{ color: RED }}>{errorMsg}</p>
+            <Card className="w-full flex items-center px-3 py-2 gap-2 mb-2">
+              <input
+                value={manualMark}
+                onChange={(e) => setManualMark(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") runManualSearch();
+                }}
+                placeholder="표기 입력 (여러 개는 쉼표로)"
+                className="flex-1 text-[15px] outline-none bg-transparent"
+                style={{ color: BLACK }}
+              />
+            </Card>
+            <button
+              onClick={runManualSearch}
+              className="w-full min-h-[48px] rounded-full font-bold text-[16px] mb-2"
+              style={{ backgroundColor: RED, color: "#fff" }}
+            >
+              입력으로 검색
+            </button>
+            <button
+              onClick={resumeScanning}
+              className="w-full min-h-[44px] rounded-full font-bold text-[15px]"
+              style={{ backgroundColor: BLACK, color: "#fff" }}
+            >
+              다시 인식하기
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
+  const [registered, setRegistered] = useState(false);
+
+  useEffect(() => {
+    if (!pill || detailSource !== "scan") return;
+    const intro = `${pill.name}. ${pill.tag}. ${pill.timing}`;
+    const t = setTimeout(() => speak(intro), 400);
+    return () => clearTimeout(t);
+  }, [pill?.id, pill?.name, detailSource]);
+
+  if (!pill) return null;
+
+  return (
+    <div className="flex flex-col h-full overflow-y-auto pb-28" style={{ backgroundColor: BG }}>
+      <div className="px-4 pt-5 pb-3 flex items-center gap-3 bg-white">
+        <button onClick={() => setScreen(detailSource === "search" ? "search" : "home")} className="w-[40px] h-[40px] flex items-center justify-center">
+          <ChevronLeft size={28} color={BLACK} />
+        </button>
+        {detailSource === "scan" && (
+          <button onClick={() => speak(`${pill.name}. ${pill.tag}. ${pill.timing}`)} className="ml-auto w-[40px] h-[40px] flex items-center justify-center">
+            <Volume2 size={22} color={RED} />
+          </button>
+        )}
+      </div>
+
+      {/* Pill image */}
+      <div className="bg-white px-5 pt-2 pb-5">
+        <div className="w-full h-[180px] rounded-2xl overflow-hidden flex items-center justify-center" style={{ backgroundColor: "#F9FAFB" }}>
+          {pill.imageUrl ? (
+            <img src={pill.imageUrl} alt={pill.name} className="w-full h-full object-contain" />
+          ) : (
+            <span className="text-[16px] font-bold" style={{ color: GRAY }}>이미지 없음</span>
+          )}
+        </div>
+        <p className="text-[24px] font-extrabold mt-4 leading-tight" style={{ color: BLACK }}>{pill.name}</p>
+        {pill.entpName && <p className="text-[13px] mt-1" style={{ color: GRAY }}>{pill.entpName}</p>}
+      </div>
+
+      {/* Details */}
+      <div className="px-4 pt-4">
+        <Card className="p-5">
+          <p className="text-[16px] font-extrabold mb-3" style={{ color: BLACK }}>세부사항</p>
+
+          <Section title="1. 기본 정보">
+            <p className="text-[13px] leading-relaxed" style={{ color: GRAY2 }}>
+              <b>분류:</b> {pill.tag}
+            </p>
+          </Section>
+
+          <Section title="2. 복용 방법">
+            <p className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: GRAY2 }}>{pill.timing || "정보 없음"}</p>
+          </Section>
+
+          <Section title="3. 효과 및 효능">
+            <p className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: GRAY2 }}>{pill.effect || "정보 없음"}</p>
+          </Section>
+
+          <Section title="4. 주의사항">
+            <p className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: GRAY2 }}>{pill.caution || "정보 없음"}</p>
+          </Section>
+
+          {pill.durWarning && (
+            <Section title="5. 병용 금기">
+              <p className="text-[13px] leading-relaxed" style={{ color: RED }}>{pill.durWarning}</p>
+            </Section>
+          )}
+        </Card>
+      </div>
+
+      <div className="px-4 pt-4 pb-4">
+        <button
+          onClick={() => { addToSchedule(pill); setRegistered(true); if (detailSource === "scan") speak("복용 관리에 등록되었습니다"); }}
+          className="w-full min-h-[52px] rounded-full font-bold text-[17px]"
+          style={{ backgroundColor: registered ? GREEN : RED, color: "#fff" }}
+        >
+          {registered ? "복용 관리에 등록됨 ✓" : "복용 관리 등록하기"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Section({ title, children }) {
+  return (
+    <div className="mb-3">
+      <p className="text-[14px] font-bold mb-1" style={{ color: BLACK }}>{title}</p>
+      {children}
+    </div>
+  );
+}
+
+
+function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChange }) {
+  const [takenIds, setTakenIds] = useState([]);
+  const [view, setView] = useState("list"); // list | camera
+  const [status, setStatus] = useState("ready"); // ready | reading | looking | done | error
+  const [msg, setMsg] = useState("");
+  const [foundNames, setFoundNames] = useState([]);
+  const [cameraError, setCameraError] = useState("");
+  const [snapUrl, setSnapUrl] = useState("");
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+
+  const toggleTaken = (id) => setTakenIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const stopCamera = () => {
+    if (!streamRef.current) return;
+    streamRef.current.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  };
+
+  const openCamera = async () => {
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      setCameraError("카메라를 지원하지 않는 브라우저입니다.");
+      return false;
+    }
+    if (!window.isSecureContext) {
+      setCameraError("HTTPS 또는 localhost에서만 카메라를 사용할 수 있습니다.");
+      return false;
+    }
+    setCameraError("");
+    stopCamera();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        try {
+          await videoRef.current.play();
+        } catch {}
+      }
+      return true;
+    } catch {
+      setCameraError("카메라 권한을 허용해주세요.");
+      return false;
+    }
+  };
+
+  const startCameraView = async () => {
+    setView("camera");
+    onCameraModeChange?.(true);
+    setStatus("ready");
+    setMsg("");
+    setFoundNames([]);
+    if (snapUrl) {
+      URL.revokeObjectURL(snapUrl);
+      setSnapUrl("");
+    }
+    await openCamera();
+  };
+
+  const backToList = () => {
+    stopCamera();
+    setView("list");
+    onCameraModeChange?.(false);
+    setStatus("ready");
+    setMsg("");
+    setFoundNames([]);
+    setCameraError("");
+    if (snapUrl) {
+      URL.revokeObjectURL(snapUrl);
+      setSnapUrl("");
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      stopCamera();
+      onCameraModeChange?.(false);
+    };
+  }, []);
+
+  const processCapturedCanvas = async (canvas) => {
+    setStatus("reading");
+    setMsg("문서 보정 → OCR → 구조화 추출 중...");
+    try {
+      const docResult = await recognizeDocumentPipeline(canvas, {
+        searchFn: async (name) => {
+          const list = await searchPillList(name);
+          return list.map((it) => ({
+            ...it,
+            ITEM_NAME: it.name,
+            ITEM_SEQ: it.itemSeq,
+          }));
+        },
+        debug: false,
+      });
+
+      // Persist bag context for pill Vision Search cross-check
+      setSessionBagContext(docResult);
+
+      const candidates = docResult.drugNames || docResult.rawCandidates || [];
+      const items = docResult.items || [];
+      const doseText = (docResult.doses || []).map((d) => d.raw || `${d.value}${d.unit}`).join(", ");
+      const freqText = (docResult.frequencies || []).map((f) => f.raw || `1일 ${f.perDay}회`).join(", ");
+      const timeText = (docResult.times || []).join(", ");
+
+      if (!candidates.length && !items.length) {
+        setStatus("error");
+        setMsg("약 이름을 읽지 못했습니다. 밝은 곳에서 다시 촬영해주세요.");
+        return;
+      }
+
+      const summaryBits = [
+        candidates.length ? `약 ${candidates.length}개` : null,
+        doseText ? `용량 ${doseText}` : null,
+        freqText ? `횟수 ${freqText}` : null,
+        timeText ? `시간 ${timeText}` : null,
+      ].filter(Boolean);
+
+      setFoundNames(candidates.length ? candidates : items.map((it) => it._matchedName || it.name || it.ITEM_NAME));
+      setStatus("looking");
+      setMsg(`${summaryBits.join(" · ")} 확인. 정보를 조회해요...`);
+
+      let added = 0;
+      const failed = [];
+      const seen = new Set();
+
+      const enqueue = async (itemOrName) => {
+        const isObj = typeof itemOrName === "object" && itemOrName;
+        const name = isObj
+          ? itemOrName._matchedName || itemOrName.name || itemOrName.ITEM_NAME
+          : itemOrName;
+        const seq = isObj ? itemOrName.itemSeq || itemOrName.ITEM_SEQ : null;
+        const key = seq || name;
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        try {
+          let detail;
+          if (seq) {
+            detail = await fetchPillDetailBySeq(seq, name, schedule).catch(() => null);
+          }
+          if (!detail) {
+            const list = await searchPillList(name);
+            const top = list[0];
+            if (!top) {
+              failed.push(name);
+              return;
+            }
+            detail = await fetchPillDetailBySeq(top.itemSeq, top.name, schedule).catch(() => ({
+              id: top.itemSeq,
+              itemSeq: top.itemSeq,
+              name: top.name,
+              tag: top.tag || "의약품",
+              time: timeText || "처방 정보 확인",
+              timing: top.timing || freqText || "복용법 정보 없음",
+              effect: top.effect || top.tag || "정보 없음",
+              caution: top.caution || "주의사항 정보 없음",
+              durWarning: null,
+              imageUrl: top.imageUrl || "",
+              entpName: top.entpName || "",
+            }));
+          }
+          // Attach structured bag fields onto schedule entry
+          detail = {
+            ...detail,
+            time: detail.time || timeText || "처방 정보 확인",
+            timing: [detail.timing, freqText, doseText].filter(Boolean).join(" · ") || detail.timing,
+            bagMeta: {
+              doses: docResult.doses || [],
+              frequencies: docResult.frequencies || [],
+              times: docResult.times || [],
+            },
+          };
+          addToSchedule(detail);
+          added += 1;
+        } catch {
+          failed.push(name);
+        }
+      };
+
+      if (items.length) {
+        for (const it of items.slice(0, 8)) await enqueue(it);
+      } else {
+        for (const name of candidates.slice(0, 8)) await enqueue(name);
+      }
+
+      if (added === 0) {
+        setStatus("error");
+        setMsg("약은 읽었지만 정보를 찾지 못했습니다. 다시 촬영하거나 약 찾기를 이용해주세요.");
+        return;
+      }
+
+      setStatus("done");
+      setMsg(
+        failed.length
+          ? `${added}개 약을 복용 관리에 추가했습니다. (일부 실패: ${failed.join(", ")})`
+          : `${added}개 약을 복용 관리에 추가했습니다.${timeText ? ` · ${timeText}` : ""}`
+      );
+    } catch (err) {
+      console.error(err);
+      setStatus("error");
+      setMsg("이미지 인식에 실패했습니다. 다시 촬영해주세요.");
+    }
+  };
+
+  const takePhoto = async () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) {
+      setStatus("error");
+      setMsg("카메라가 아직 준비되지 않았습니다.");
+      return;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    // 미리보기용
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      if (snapUrl) URL.revokeObjectURL(snapUrl);
+      setSnapUrl(URL.createObjectURL(blob));
+    }, "image/jpeg", 0.9);
+
+    stopCamera();
+    await processCapturedCanvas(canvas);
+  };
+
+  const retake = async () => {
+    setStatus("ready");
+    setMsg("");
+    setFoundNames([]);
+    if (snapUrl) {
+      URL.revokeObjectURL(snapUrl);
+      setSnapUrl("");
+    }
+    await openCamera();
+  };
+
+  // ---- 카메라 촬영 화면 (실시간 인식 X, 버튼으로 1장 촬영) ----
+  if (view === "camera") {
+    const busy = status === "reading" || status === "looking";
+    return (
+      <div className="flex flex-col h-full" style={{ backgroundColor: "#000" }}>
+        <div className="px-4 pt-5 pb-3 flex items-center gap-3">
+          <button onClick={backToList} className="w-[40px] h-[40px] flex items-center justify-center">
+            <ChevronLeft size={28} color="#fff" />
+          </button>
+          <p className="text-[18px] font-bold text-white">처방전 / 약봉지 촬영</p>
+        </div>
+
+        <div className="flex-1 relative overflow-hidden">
+          {snapUrl && status !== "ready" ? (
+            <img src={snapUrl} alt="촬영 사진" className="absolute inset-0 w-full h-full object-cover" />
+          ) : (
+            <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover" />
+          )}
+
+          {cameraError ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 px-8" style={{ backgroundColor: BG }}>
+              <p className="text-[15px] text-center leading-relaxed" style={{ color: BLACK }}>{cameraError}</p>
+              <button
+                onClick={openCamera}
+                className="min-h-[44px] px-5 rounded-full font-bold text-[15px]"
+                style={{ backgroundColor: RED, color: "#fff" }}
+              >
+                다시 시도
+              </button>
+            </div>
+          ) : status === "ready" ? (
+            <div
+              className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[280px] h-[360px] rounded-2xl"
+              style={{ border: "3px solid rgba(255,255,255,0.75)", boxShadow: "0 0 0 9999px rgba(0,0,0,0.35)" }}
+            />
+          ) : null}
+        </div>
+
+        <div className="px-5 py-4" style={{ backgroundColor: CARD }}>
+          {status === "ready" && (
+            <>
+              <p className="text-[14px] text-center font-bold mb-3" style={{ color: BLACK }}>
+                처방전/약봉지를 맞춘 뒤 촬영하세요
+              </p>
+              <button
+                onClick={takePhoto}
+                className="w-full min-h-[52px] rounded-full font-bold text-[17px]"
+                style={{ backgroundColor: RED, color: "#fff" }}
+              >
+                촬영하기
+              </button>
+            </>
+          )}
+
+          {busy && (
+            <p className="text-[15px] text-center font-bold" style={{ color: BLACK }}>
+              {msg || "처리 중..."}
+            </p>
+          )}
+
+          {(status === "done" || status === "error") && (
+            <div>
+              <p
+                className="text-[14px] text-center font-bold mb-2 leading-relaxed"
+                style={{ color: status === "error" ? RED : GREEN }}
+              >
+                {msg}
+              </p>
+              {foundNames.length > 0 && (
+                <p className="text-[12px] text-center mb-3" style={{ color: GRAY }}>
+                  인식된 이름: {foundNames.join(", ")}
+                </p>
+              )}
+              <button
+                onClick={retake}
+                className="w-full min-h-[48px] rounded-full font-bold text-[16px] mb-2"
+                style={{ backgroundColor: RED, color: "#fff" }}
+              >
+                다시 촬영하기
+              </button>
+              <button
+                onClick={backToList}
+                className="w-full min-h-[44px] rounded-full font-bold text-[15px]"
+                style={{ backgroundColor: BLACK, color: "#fff" }}
+              >
+                복용 관리로 돌아가기
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ---- 목록 화면 ----
+  return (
+    <div className="flex flex-col h-full overflow-y-auto pb-24" style={{ backgroundColor: BG }}>
+      <div className="px-5 pt-6 pb-3 bg-white">
+        <p className="text-[22px] font-extrabold text-center" style={{ color: BLACK }}>복용 관리</p>
+      </div>
+
+      <div className="px-4 pt-4">
+        <Card className="p-4">
+          <p className="text-[16px] font-extrabold" style={{ color: BLACK }}>처방전 · 약봉지 등록</p>
+          <p className="text-[13px] mt-1 leading-relaxed" style={{ color: GRAY2 }}>
+            카메라를 켜고 촬영하면 약 이름을 읽어 복용 관리에 추가합니다.
+          </p>
+          <button
+            onClick={startCameraView}
+            className="w-full min-h-[48px] rounded-full font-bold text-[16px] mt-3 flex items-center justify-center gap-2"
+            style={{ backgroundColor: RED, color: "#fff" }}
+          >
+            <Camera size={18} />
+            처방전 / 약봉지 촬영
+          </button>
+        </Card>
+      </div>
+
+      {schedule.length === 0 ? (
+        <div className="px-4 pt-8 flex flex-col items-center gap-3">
+          <p className="text-[15px] text-center" style={{ color: GRAY }}>
+            등록된 약이 없습니다.
+            <br />
+            위 버튼으로 처방전/약봉지를 촬영해보세요.
+          </p>
+        </div>
+      ) : (
+        <div className="px-4 pt-4 flex flex-col gap-3">
+          <p className="text-[14px] font-bold" style={{ color: GRAY2 }}>
+            등록된 약 {schedule.length}개
+          </p>
+          {schedule.map((p) => {
+            const taken = takenIds.includes(p.id);
+            return (
+              <Card key={p.id} className="w-full flex items-center gap-3 px-4 py-3" style={{ opacity: taken ? 0.5 : 1 }}>
+                <div className="w-[60px] h-[60px] rounded-xl flex-shrink-0 overflow-hidden flex items-center justify-center" style={{ backgroundColor: "#F9FAFB" }}>
+                  {p.imageUrl ? (
+                    <img src={p.imageUrl} alt={p.name} className="w-full h-full object-contain" />
+                  ) : (
+                    <span className="text-[12px] font-bold" style={{ color: GRAY }}>약</span>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[16px] font-bold leading-tight truncate" style={{ color: BLACK }}>{p.name}</p>
+                  <p className="text-[12px] mt-0.5 truncate" style={{ color: GRAY }}>{p.tag}</p>
+                  <p className="text-[12px]" style={{ color: GRAY }}>{(p.timing || "").slice(0, 30)}</p>
+                </div>
+                <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                  <button
+                    onClick={() => toggleTaken(p.id)}
+                    className="min-h-[36px] px-3 rounded-full font-bold text-[13px] flex items-center gap-1"
+                    style={{
+                      backgroundColor: taken ? GREEN_BG : RED_LIGHT,
+                      color: taken ? GREEN : RED,
+                    }}
+                  >
+                    {taken ? (<><Check size={14} /> 복용완료</>) : "복용 체크"}
+                  </button>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -871,35 +1795,33 @@ function ManagementScreen({ setScreen, schedule }) {
 export default function App() {
   const [screen, setScreen] = useState("home");
   const [activePill, setActivePill] = useState(null);
+  const [detailSource, setDetailSource] = useState("search");
   const [schedule, setSchedule] = useState([]);
+  const [mgmtCamera, setMgmtCamera] = useState(false);
 
   const addToSchedule = (pill) => {
     setSchedule((prev) => (prev.find((p) => p.id === pill.id) ? prev : [...prev, pill]));
   };
 
   return (
-    <div className="w-full h-full flex items-center justify-center bg-gray-100 p-4">
-      <style>{`
-        @import url('//cdn.jsdelivr.net/npm/font-kopubworld@1.0/dotum.min.css');
-      `}</style>
+    <div className="w-full h-full flex items-center justify-center bg-gray-200 p-2">
       <div
-        className="relative w-[390px] h-[780px] bg-white rounded-[36px] overflow-hidden shadow-2xl border-8"
-        style={{ borderColor: "#111", fontFamily: "'KoPubWorld Dotum', 'Malgun Gothic', sans-serif" }}
+        className="relative w-[390px] h-[780px] bg-white rounded-[40px] overflow-hidden shadow-2xl border-[6px]"
+        style={{ borderColor: "#222", fontFamily: "'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif" }}
       >
-        {screen === "home" && (
-          <HomeScreen setScreen={setScreen} setActivePill={setActivePill} schedule={schedule} />
+        {screen === "home" && <HomeScreen setScreen={setScreen} setActivePill={setActivePill} setDetailSource={setDetailSource} schedule={schedule} />}
+        {screen === "search" && <SearchScreen setScreen={setScreen} setActivePill={setActivePill} setDetailSource={setDetailSource} schedule={schedule} />}
+        {screen === "scan" && <ScanScreen setScreen={setScreen} setActivePill={setActivePill} setDetailSource={setDetailSource} schedule={schedule} />}
+        {screen === "detail" && <DetailScreen setScreen={setScreen} pill={activePill} addToSchedule={addToSchedule} detailSource={detailSource} />}
+        {screen === "management" && (
+          <ManagementScreen
+            setScreen={setScreen}
+            schedule={schedule}
+            addToSchedule={addToSchedule}
+            onCameraModeChange={setMgmtCamera}
+          />
         )}
-        {screen === "search" && (
-          <SearchScreen setScreen={setScreen} setActivePill={setActivePill} schedule={schedule} />
-        )}
-        {screen === "scan" && (
-          <ScanScreen setScreen={setScreen} setActivePill={setActivePill} schedule={schedule} />
-        )}
-        {screen === "detail" && (
-          <DetailScreen setScreen={setScreen} pill={activePill} addToSchedule={addToSchedule} />
-        )}
-        {screen === "management" && <ManagementScreen setScreen={setScreen} schedule={schedule} />}
-        {screen !== "scan" && <BottomNav screen={screen} setScreen={setScreen} />}
+        {screen !== "scan" && !mgmtCamera && <BottomNav screen={screen} setScreen={setScreen} />}
       </div>
     </div>
   );
