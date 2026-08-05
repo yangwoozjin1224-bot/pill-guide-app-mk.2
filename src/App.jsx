@@ -12,6 +12,11 @@ import {
   getPrescriptionDrugNames,
   evaluateCaptureQuality,
   createMessageThrottle,
+  addFeedback,
+  getFeedbackStats,
+  getFeedbackCount,
+  clearFeedback,
+  isFeedbackImageAllowed,
 } from "./vision/pipeline.js";
 import { formatMetricsSummary, getMetrics } from "./vision/metrics.js";
 
@@ -453,7 +458,14 @@ function HomeScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       {/* Header */}
       <div className="px-5 pt-6 pb-4 flex items-center justify-between bg-white">
         <p className="text-[22px] font-extrabold" style={{ color: BLACK }}>양우진 님</p>
-        <span className="text-[20px]" style={{ color: GRAY }}>•••</span>
+        <button
+          type="button"
+          onClick={() => setScreen("feedbackStats")}
+          className="text-[12px] font-bold px-2 py-1 rounded-lg"
+          style={{ color: GRAY2, backgroundColor: "#F3F4F6" }}
+        >
+          피드백 {getFeedbackCount()}
+        </button>
       </div>
 
       <div className="px-4 pt-4">
@@ -1197,32 +1209,34 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           ) : null}
           <div className="flex flex-col gap-2 overflow-y-auto" style={{ maxHeight: "560px" }}>
             {foundPills.map((p) => (
-              <Card key={p.id} className="w-full flex items-center gap-3 px-3 py-3 text-left" onClick={() => openPill(p)}>
-                <div className="w-[56px] h-[56px] rounded-xl flex-shrink-0 overflow-hidden flex items-center justify-center" style={{ backgroundColor: "#F9FAFB" }}>
-                  {p.imageUrl ? (
-                    <img src={p.imageUrl} alt={p.name} className="w-full h-full object-contain" />
-                  ) : (
-                    <span className="text-[12px] font-bold" style={{ color: GRAY }}>약</span>
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-[15px] font-bold leading-tight" style={{ color: BLACK }}>{p.name}</p>
-                  <p className="text-[12px] mt-0.5 truncate" style={{ color: GRAY }}>
-                    {[p.detectedMark && `표기 ${p.detectedMark}`, p.tag].filter(Boolean).join(" · ")}
-                  </p>
-                  {matchSourceLabel(p.matchSource) ? (
-                    <p
-                      className="text-[11px] font-bold mt-1 inline-block px-2 py-0.5 rounded-md"
-                      style={{
-                        color: p.matchSource === "prescription" ? GREEN : GRAY2,
-                        backgroundColor: p.matchSource === "prescription" ? GREEN_BG : "#F3F4F6",
-                      }}
-                    >
-                      {matchSourceLabel(p.matchSource)}
+              <Card key={p.id} className="w-full px-3 py-3 text-left">
+                <button type="button" className="w-full flex items-center gap-3" onClick={() => openPill(p)}>
+                  <div className="w-[56px] h-[56px] rounded-xl flex-shrink-0 overflow-hidden flex items-center justify-center" style={{ backgroundColor: "#F9FAFB" }}>
+                    {p.imageUrl ? (
+                      <img src={p.imageUrl} alt={p.name} className="w-full h-full object-contain" />
+                    ) : (
+                      <span className="text-[12px] font-bold" style={{ color: GRAY }}>약</span>
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0 text-left">
+                    <p className="text-[15px] font-bold leading-tight" style={{ color: BLACK }}>{p.name}</p>
+                    <p className="text-[12px] mt-0.5 truncate" style={{ color: GRAY }}>
+                      {[p.detectedMark && `표기 ${p.detectedMark}`, p.tag].filter(Boolean).join(" · ")}
                     </p>
-                  ) : null}
-                </div>
-                <ChevronRight size={18} color={GRAY} />
+                    {matchSourceLabel(p.matchSource) ? (
+                      <p
+                        className="text-[11px] font-bold mt-1 inline-block px-2 py-0.5 rounded-md"
+                        style={{
+                          color: p.matchSource === "prescription" ? GREEN : GRAY2,
+                          backgroundColor: p.matchSource === "prescription" ? GREEN_BG : "#F3F4F6",
+                        }}
+                      >
+                        {matchSourceLabel(p.matchSource)}
+                      </p>
+                    ) : null}
+                  </div>
+                  <ChevronRight size={18} color={GRAY} />
+                </button>
               </Card>
             ))}
           </div>
@@ -1422,6 +1436,248 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   );
 }
 
+function FeedbackPanel({ pill, onDone }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [manualName, setManualName] = useState("");
+  const [hits, setHits] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [consent, setConsent] = useState(false);
+  const [savedMsg, setSavedMsg] = useState("");
+  const [error, setError] = useState("");
+
+  const runSearch = async () => {
+    const q = query.trim();
+    if (!q) return;
+    setSearching(true);
+    setError("");
+    try {
+      const list = await searchPillList(q);
+      setHits(list.slice(0, 8));
+      if (!list.length) setError("검색 결과가 없습니다. 아래 직접 입력을 이용해 주세요.");
+    } catch {
+      setError("검색에 실패했습니다.");
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const submit = (correct, source) => {
+    try {
+      // PRIVACY: never attach image unless consent; we do not capture frame here by default
+      addFeedback({
+        predicted: {
+          name: pill?.name || "",
+          itemSeq: pill?.itemSeq || pill?.id || "",
+          matchSource: pill?.matchSource || null,
+          confidence: pill?.rerankScore || pill?.fusedScore || 0,
+          mark: pill?.detectedMark || pill?.mark || "",
+        },
+        correct: {
+          name: correct.name,
+          itemSeq: correct.itemSeq || "",
+          source,
+        },
+        consentImageStore: consent && isFeedbackImageAllowed(),
+        imageDataUrl: null,
+        features: {
+          imprint: pill?.detectedMark || "",
+          color: pill?.color || "",
+          shape: pill?.shape || "",
+        },
+        context: {
+          prescriptionPoolSize: getPrescriptionDrugNames().length,
+          pipeline: "imprint-db",
+        },
+      });
+      setSavedMsg("피드백 감사합니다. 인식 개선에 반영할게요.");
+      setOpen(false);
+      onDone?.();
+    } catch (e) {
+      setError(e?.message || "저장에 실패했습니다.");
+    }
+  };
+
+  if (savedMsg) {
+    return (
+      <p className="text-[13px] font-bold text-center px-3 py-2 rounded-xl" style={{ color: GREEN, backgroundColor: GREEN_BG }}>
+        {savedMsg}
+      </p>
+    );
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="w-full min-h-[44px] rounded-full font-bold text-[15px]"
+        style={{ backgroundColor: "#F3F4F6", color: GRAY2 }}
+      >
+        이거 아니에요
+      </button>
+    );
+  }
+
+  return (
+    <Card className="p-4">
+      <p className="text-[15px] font-extrabold mb-2" style={{ color: BLACK }}>정답 약 알려주기</p>
+      <p className="text-[12px] mb-3 leading-relaxed" style={{ color: GRAY2 }}>
+        인식 결과를 바로잡으면 다음에 더 잘 맞추는 데 도움이 됩니다.
+      </p>
+
+      <div className="flex gap-2 mb-2">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && runSearch()}
+          placeholder="약 이름 검색"
+          className="flex-1 min-h-[44px] px-3 rounded-xl text-[14px] outline-none"
+          style={{ backgroundColor: "#F9FAFB", border: `1px solid ${BORDER}`, color: BLACK }}
+        />
+        <button
+          type="button"
+          onClick={runSearch}
+          className="px-4 rounded-xl font-bold text-[14px]"
+          style={{ backgroundColor: RED, color: "#fff" }}
+        >
+          {searching ? "…" : "검색"}
+        </button>
+      </div>
+
+      {error && <p className="text-[12px] mb-2" style={{ color: RED }}>{error}</p>}
+
+      <div className="flex flex-col gap-1 mb-3 max-h-[160px] overflow-y-auto">
+        {hits.map((h) => (
+          <button
+            key={h.itemSeq || h.id || h.name}
+            type="button"
+            onClick={() => submit({ name: h.name, itemSeq: h.itemSeq }, "search")}
+            className="text-left px-3 py-2 rounded-xl text-[13px] font-bold"
+            style={{ backgroundColor: "#F9FAFB", color: BLACK }}
+          >
+            {h.name}
+          </button>
+        ))}
+      </div>
+
+      <input
+        value={manualName}
+        onChange={(e) => setManualName(e.target.value)}
+        placeholder="또는 약 이름 직접 입력"
+        className="w-full min-h-[44px] px-3 rounded-xl text-[14px] outline-none mb-2"
+        style={{ backgroundColor: "#F9FAFB", border: `1px solid ${BORDER}`, color: BLACK }}
+      />
+      <button
+        type="button"
+        onClick={() => submit({ name: manualName.trim() }, "manual")}
+        disabled={!manualName.trim()}
+        className="w-full min-h-[44px] rounded-full font-bold text-[14px] mb-3 disabled:opacity-40"
+        style={{ backgroundColor: BLACK, color: "#fff" }}
+      >
+        직접 입력으로 제출
+      </button>
+
+      {isFeedbackImageAllowed() && (
+        <label className="flex items-start gap-2 text-[11px] leading-relaxed" style={{ color: GRAY2 }}>
+          <input
+            type="checkbox"
+            checked={consent}
+            onChange={(e) => setConsent(e.target.checked)}
+            className="mt-0.5"
+          />
+          <span>
+            개선을 위해 축소 이미지 저장에 동의합니다 (선택). 동의 없이 원본 사진을 서버에 저장하지 않습니다.
+          </span>
+        </label>
+      )}
+
+      <button
+        type="button"
+        onClick={() => setOpen(false)}
+        className="w-full mt-3 text-[12px] font-bold underline"
+        style={{ color: GRAY }}
+      >
+        취소
+      </button>
+    </Card>
+  );
+}
+
+function FeedbackStatsScreen({ setScreen }) {
+  const [stats, setStats] = useState(() => getFeedbackStats());
+
+  const refresh = () => setStats(getFeedbackStats());
+
+  return (
+    <div className="flex flex-col h-full overflow-y-auto pb-24" style={{ backgroundColor: BG }}>
+      <div className="px-4 pt-5 pb-3 flex items-center gap-3 bg-white">
+        <button onClick={() => setScreen("home")} className="w-[40px] h-[40px] flex items-center justify-center">
+          <ChevronLeft size={28} color={BLACK} />
+        </button>
+        <p className="text-[18px] font-extrabold" style={{ color: BLACK }}>피드백 통계</p>
+      </div>
+
+      <div className="px-4 pt-4 flex flex-col gap-3">
+        <Card className="p-4">
+          <p className="text-[14px] font-bold" style={{ color: GRAY2 }}>총 피드백</p>
+          <p className="text-[28px] font-extrabold" style={{ color: BLACK }}>{stats.total}</p>
+          <p className="text-[11px] mt-1" style={{ color: GRAY }}>
+            로컬 저장만 사용 · 서버 업로드 없음
+          </p>
+        </Card>
+
+        <Card className="p-4">
+          <p className="text-[15px] font-extrabold mb-2" style={{ color: BLACK }}>가장 많이 틀린 예측 Top 10</p>
+          {stats.topWrongPredictions.length === 0 ? (
+            <p className="text-[13px]" style={{ color: GRAY }}>아직 데이터가 없습니다.</p>
+          ) : (
+            stats.topWrongPredictions.map((row, i) => (
+              <div key={row.name} className="flex justify-between py-1.5 text-[13px]" style={{ borderBottom: `1px solid ${BORDER}` }}>
+                <span style={{ color: BLACK }}>{i + 1}. {row.name}</span>
+                <span style={{ color: GRAY2 }}>{row.count}회</span>
+              </div>
+            ))
+          )}
+        </Card>
+
+        <Card className="p-4">
+          <p className="text-[15px] font-extrabold mb-2" style={{ color: BLACK }}>최근 피드백</p>
+          {stats.recent.map((r) => (
+            <div key={r.id} className="py-2 text-[12px]" style={{ borderBottom: `1px solid ${BORDER}`, color: GRAY2 }}>
+              <span style={{ color: RED }}>{r.predicted || "?"}</span>
+              {" → "}
+              <span style={{ color: GREEN }}>{r.correct}</span>
+            </div>
+          ))}
+        </Card>
+
+        <button
+          type="button"
+          onClick={refresh}
+          className="w-full min-h-[44px] rounded-full font-bold text-[14px]"
+          style={{ backgroundColor: "#F3F4F6", color: BLACK }}
+        >
+          새로고침
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            if (typeof window !== "undefined" && window.confirm("모든 로컬 피드백을 삭제할까요?")) {
+              clearFeedback();
+              refresh();
+            }
+          }}
+          className="w-full text-[12px] font-bold underline"
+          style={{ color: GRAY }}
+        >
+          피드백 데이터 지우기 ({getFeedbackCount()}건)
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
   const [registered, setRegistered] = useState(false);
 
@@ -1458,6 +1714,11 @@ function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
         </div>
         <p className="text-[24px] font-extrabold mt-4 leading-tight" style={{ color: BLACK }}>{pill.name}</p>
         {pill.entpName && <p className="text-[13px] mt-1" style={{ color: GRAY }}>{pill.entpName}</p>}
+        {matchSourceLabel(pill.matchSource) && (
+          <p className="text-[11px] font-bold mt-2 inline-block px-2 py-0.5 rounded-md" style={{ color: GREEN, backgroundColor: GREEN_BG }}>
+            {matchSourceLabel(pill.matchSource)}
+          </p>
+        )}
       </div>
 
       {/* Details */}
@@ -1491,7 +1752,11 @@ function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
         </Card>
       </div>
 
-      <div className="px-4 pt-4 pb-4">
+      <div className="px-4 pt-4 pb-2">
+        <FeedbackPanel pill={pill} />
+      </div>
+
+      <div className="px-4 pt-2 pb-4">
         <button
           onClick={() => { addToSchedule(pill); setRegistered(true); if (detailSource === "scan") speak("복용 관리에 등록되었습니다"); }}
           className="w-full min-h-[52px] rounded-full font-bold text-[17px]"
@@ -2095,6 +2360,7 @@ export default function App() {
         {screen === "search" && <SearchScreen setScreen={setScreen} setActivePill={setActivePill} setDetailSource={setDetailSource} schedule={schedule} />}
         {screen === "scan" && <ScanScreen setScreen={setScreen} setActivePill={setActivePill} setDetailSource={setDetailSource} schedule={schedule} />}
         {screen === "detail" && <DetailScreen setScreen={setScreen} pill={activePill} addToSchedule={addToSchedule} detailSource={detailSource} />}
+        {screen === "feedbackStats" && <FeedbackStatsScreen setScreen={setScreen} />}
         {screen === "management" && (
           <ManagementScreen
             setScreen={setScreen}
@@ -2103,8 +2369,7 @@ export default function App() {
             onCameraModeChange={setMgmtCamera}
           />
         )}
-        {screen !== "scan" && !mgmtCamera && <BottomNav screen={screen} setScreen={setScreen} />}
-      </div>
+        {screen !== "scan" && screen !== "feedbackStats" && !mgmtCamera && <BottomNav screen={screen} setScreen={setScreen} />}      </div>
     </div>
   );
 }

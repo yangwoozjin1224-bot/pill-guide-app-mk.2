@@ -49,6 +49,16 @@ export {
 } from "./quality/index.js";
 
 export {
+  addFeedback,
+  listFeedback,
+  clearFeedback,
+  getFeedbackCount,
+  getFeedbackStats,
+  makeFeedbackThumbnail,
+  isFeedbackImageAllowed,
+} from "./feedback/index.js";
+
+export {
   recognizeMedicineBag as recognizeDocumentPipeline,
   setSessionBagContext,
   getSessionBagHints,
