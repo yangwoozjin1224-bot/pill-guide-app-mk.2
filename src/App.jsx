@@ -66,6 +66,8 @@ const SCAN_INACTIVE = "#C4B5FD";
 const MANAGE_CARD_BG = "#D5F2DE";
 const MANAGE_BUTTON_BG = "#34C759";
 const SEARCH_BG = "#F6F6F6";
+const DETAIL_CARD_BG = "#F8F9FB";
+const DETAIL_CTA_BG = "#4669C9";
 
 const API_KEY =
   (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_API_KEY) ||
@@ -403,17 +405,17 @@ async function fetchPillData(params = {}, currentSchedule = []) {
 }
 
 const CATEGORIES = [
-  { label: "가려움 / 물집", emoji: "🤚", q: "가려움" },
-  { label: "두통 / 치통", emoji: "🤕", q: "두통" },
-  { label: "설사통 / 통증", emoji: "😣", q: "설사" },
-  { label: "소화불량 / 위통", emoji: "🤢", q: "소화불량" },
-  { label: "근육통 / 관절통", emoji: "💪", q: "근육통" },
-  { label: "비염 / 알레르기", emoji: "🤧", q: "알레르기" },
-  { label: "상처 / 피부질환", emoji: "🩹", q: "피부" },
-  { label: "눈 건강 / 안약", emoji: "👁️", q: "안약" },
-  { label: "만성질환 / 처방약", emoji: "🏥", q: "고혈압" },
-  { label: "피로회복 / 비타민", emoji: "🔋", q: "비타민" },
-  { label: "유산균 / 장 건강", emoji: "🌀", q: "유산균" },
+  { label: "가래 / 몸살", subtitle: "종합감기약, 기침, 콧물약", emoji: "🤒", q: "감기" },
+  { label: "두통 / 치통", subtitle: "해열진통제, 빠른 통증 완화약", emoji: "🤕", q: "두통" },
+  { label: "생리통 / 통증", subtitle: "생리통 전용 진통제, 여성 진통제", emoji: "😣", q: "생리통" },
+  { label: "소화불량 / 위통", subtitle: "소화제, 위산분비억제제, 제산제", emoji: "🤢", q: "소화불량" },
+  { label: "근육통 / 관절염", subtitle: "소염진통제, 바르는 겔, 붙이는 파스류", emoji: "💪", q: "근육통" },
+  { label: "비염 / 알레르기", subtitle: "항히스타민제, 코 스프레이", emoji: "🤧", q: "알레르기" },
+  { label: "상처 / 피부질환", subtitle: "연고, 습윤밴드, 두드러기 약", emoji: "🩹", q: "피부" },
+  { label: "눈 건강 / 안약", subtitle: "인공눈물, 충혈 완화제, 다래끼 약", emoji: "👁️", q: "안약" },
+  { label: "만성질환 / 처방약", subtitle: "혈압, 당뇨 등 정기 복용약 관리용", emoji: "🏥", q: "고혈압" },
+  { label: "피로회복 / 비타민", subtitle: "종합 비타민, 피로회복제, 영양제", emoji: "🔋", q: "비타민" },
+  { label: "유산균 / 장 건강", subtitle: "프로바이오틱스, 정장제, 지사제", emoji: "🌀", q: "유산균" },
 ];
 
 function speak(text) {
@@ -728,10 +730,13 @@ function SearchScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   };
 
   return (
-    <div className="flex flex-col h-full pb-24" style={{ backgroundColor: BG }}>
-      {/* Header */}
-      <div className="px-5 pt-6 pb-3 flex items-center gap-3 bg-white">
-        <button onClick={() => setScreen("home")} className="w-[40px] h-[40px] flex items-center justify-center">
+    <div className="flex flex-col h-full pb-28" style={{ backgroundColor: BG }}>
+      {/* Header: 뒤로가기 + 중앙 제목 */}
+      <div className="px-5 pt-6 pb-3 flex items-center justify-center relative bg-white">
+        <button
+          onClick={() => setScreen("home")}
+          className="absolute left-4 w-[40px] h-[40px] flex items-center justify-center"
+        >
           <ChevronLeft size={28} color={BLACK} />
         </button>
         <p className="text-[20px] font-extrabold" style={{ color: BLACK }}>약 찾기</p>
@@ -739,19 +744,22 @@ function SearchScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
       {/* Search input */}
       <div className="px-4 pt-3">
-        <Card className="w-full flex items-center px-4 py-3 gap-2">
+        <div
+          className="w-full flex items-center px-4 py-3 gap-2 rounded-2xl"
+          style={{ backgroundColor: SEARCH_BG }}
+        >
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && query.trim()) runSearch(query); }}
-            placeholder="약의 이름이나 형태, 증상을 입력해주세요"
-            className="flex-1 text-[15px] outline-none bg-transparent"
+            placeholder="약의 이름이나 형태, 효능군 등을 입력해주세요"
+            className="flex-1 text-[14px] outline-none bg-transparent"
             style={{ color: BLACK }}
           />
-          <button onClick={() => runSearch(query)}>
+          <button type="button" onClick={() => runSearch(query)} aria-label="검색">
             <Search size={20} color={GRAY} />
           </button>
-        </Card>
+        </div>
         {loading && <p className="text-[14px] font-bold mt-2 text-center" style={{ color: RED }}>검색 중...</p>}
         {errorMsg && !loading && <p className="text-[14px] mt-2 text-center" style={{ color: GRAY2 }}>{errorMsg}</p>}
       </div>
@@ -759,16 +767,26 @@ function SearchScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       {/* Categories or results */}
       {!results.length && !loading ? (
         <div className="px-4 pt-4 overflow-y-auto">
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 gap-3">
             {CATEGORIES.map((c) => (
-              <Card
+              <div
                 key={c.label}
-                className="flex flex-col items-center justify-center gap-2 py-4 px-2"
-                onClick={() => { setQuery(c.q); runSearch(c.q); }}
+                className="relative rounded-2xl border bg-white p-3 min-h-[132px] flex flex-col items-start text-left"
+                style={{ borderColor: BORDER }}
               >
-                <span className="text-[32px]">{c.emoji}</span>
-                <span className="text-[12px] font-bold text-center leading-tight" style={{ color: BLACK }}>{c.label}</span>
-              </Card>
+                <span className="text-[28px] leading-none">{c.emoji}</span>
+                <p className="text-[14px] font-extrabold mt-2 leading-tight" style={{ color: BLACK }}>{c.label}</p>
+                <p className="text-[11px] mt-1 leading-snug pr-8" style={{ color: GRAY }}>{c.subtitle}</p>
+                <button
+                  type="button"
+                  onClick={() => { setQuery(c.q); runSearch(c.q); }}
+                  className="absolute bottom-3 right-3 w-8 h-8 rounded-lg flex items-center justify-center"
+                  style={{ backgroundColor: SCAN_BUTTON_BG }}
+                  aria-label={`${c.label} 검색`}
+                >
+                  <Plus size={18} color="#fff" strokeWidth={2.6} />
+                </button>
+              </div>
             ))}
           </div>
         </div>
@@ -1440,7 +1458,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
   if (status === "results") {
     return (
-      <div className="flex flex-col h-full pb-6" style={{ backgroundColor: BG }}>
+      <div className="flex flex-col h-full pb-28" style={{ backgroundColor: BG }}>
         <div className="px-4 pt-5 pb-3 flex items-center gap-3 bg-white">
           <button onClick={() => setScreen("home")} className="w-[40px] h-[40px] flex items-center justify-center">
             <ChevronLeft size={28} color={BLACK} />
@@ -1503,7 +1521,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   }
 
   return (
-    <div className="flex flex-col h-full" style={{ backgroundColor: "#000" }}>
+    <div className="flex flex-col h-full pb-24" style={{ backgroundColor: "#000" }}>
       <div className="px-4 pt-5 pb-3 flex items-center gap-3">
         <button onClick={() => setScreen("home")} className="w-[40px] h-[40px] flex items-center justify-center">
           <ChevronLeft size={28} color="#fff" />
@@ -1549,21 +1567,40 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             </button>
           </div>
         ) : (
-          <div
-            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[280px] h-[280px] rounded-3xl overflow-hidden"
-            style={{
-              border: `3px solid ${
-                status === "loading"
-                  ? "#34D399"
-                  : ensembleActive
-                    ? "rgba(99, 102, 241, 0.95)"
-                    : qualityOk
-                      ? "rgba(52, 211, 153, 0.95)"
-                      : "rgba(251, 191, 36, 0.95)"
-              }`,
-              boxShadow: "0 0 0 9999px rgba(0,0,0,0.4)",
-            }}
-          >
+          <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[280px] h-[280px]">
+            {/* 어두운 비네팅 (카메라 로직 미변경, 시각 레이어만) */}
+            <div
+              className="absolute inset-0 pointer-events-none"
+              style={{ boxShadow: "0 0 0 9999px rgba(0,0,0,0.4)" }}
+            />
+            {/* 품질 상태 힌트용 얇은 테두리 (기존 quality/loading 피드백 유지) */}
+            <div
+              className="absolute inset-0 rounded-3xl pointer-events-none"
+              style={{
+                border: `2px solid ${
+                  status === "loading"
+                    ? "rgba(52, 211, 153, 0.55)"
+                    : ensembleActive
+                      ? "rgba(99, 102, 241, 0.55)"
+                      : qualityOk
+                        ? "rgba(52, 211, 153, 0.45)"
+                        : "rgba(251, 191, 36, 0.55)"
+                }`,
+              }}
+            />
+            {/* 흰색 L자 모서리 브래킷 4개 */}
+            <div className="absolute top-0 left-0 w-11 h-11 border-t-[4px] border-l-[4px] border-white rounded-tl-xl pointer-events-none" />
+            <div className="absolute top-0 right-0 w-11 h-11 border-t-[4px] border-r-[4px] border-white rounded-tr-xl pointer-events-none" />
+            <div className="absolute bottom-0 left-0 w-11 h-11 border-b-[4px] border-l-[4px] border-white rounded-bl-xl pointer-events-none" />
+            <div className="absolute bottom-0 right-0 w-11 h-11 border-b-[4px] border-r-[4px] border-white rounded-br-xl pointer-events-none" />
+            {/* 중앙 스캔 라인 (정적 배치 — 애니메이션은 별도 확인) */}
+            <div
+              className="absolute left-4 right-4 top-1/2 -translate-y-1/2 h-[3px] rounded-full pointer-events-none"
+              style={{
+                background: "linear-gradient(90deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.95) 50%, rgba(255,255,255,0) 100%)",
+                boxShadow: "0 0 10px rgba(255,255,255,0.85)",
+              }}
+            />
             {pillBoxes.map((box, i) => (
               <div
                 key={i}
@@ -1617,7 +1654,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         )}
       </div>
 
-      <div className="px-5 py-4" style={{ backgroundColor: CARD }}>
+      <div className="px-5 py-4 pb-6" style={{ backgroundColor: CARD }}>
         {status !== "error" ? (
           <div className="text-center">
             <p className="text-[15px] font-bold" style={{ color: BLACK }}>{statusText}</p>
@@ -1943,76 +1980,77 @@ function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
   if (!pill) return null;
 
   return (
-    <div className="flex flex-col h-full overflow-y-auto pb-28" style={{ backgroundColor: BG }}>
-      <div className="px-4 pt-5 pb-3 flex items-center gap-3 bg-white">
+    <div className="flex flex-col h-full overflow-y-auto pb-28" style={{ backgroundColor: "#FFFFFF" }}>
+      {/* 상단: 뒤로가기만 (제목 없음). 기존 TTS 버튼 로직 유지 */}
+      <div className="px-4 pt-5 pb-2 flex items-center gap-3 bg-white">
         <button onClick={() => setScreen(detailSource === "search" ? "search" : "home")} className="w-[40px] h-[40px] flex items-center justify-center">
           <ChevronLeft size={28} color={BLACK} />
         </button>
         {detailSource === "scan" && (
           <button onClick={() => speak(`${pill.name}. ${pill.tag}. ${pill.timing}`)} className="ml-auto w-[40px] h-[40px] flex items-center justify-center">
-            <Volume2 size={22} color={RED} />
+            <Volume2 size={22} color={GRAY2} />
           </button>
         )}
       </div>
 
-      {/* Pill image */}
-      <div className="bg-white px-5 pt-2 pb-5">
-        <div className="w-full h-[180px] rounded-2xl overflow-hidden flex items-center justify-center" style={{ backgroundColor: "#F9FAFB" }}>
+      {/* 중앙 약 이미지 */}
+      <div className="bg-white px-5 pt-2 pb-6 flex flex-col items-center">
+        <div className="w-full h-[200px] flex items-center justify-center">
           {pill.imageUrl ? (
-            <img src={pill.imageUrl} alt={pill.name} className="w-full h-full object-contain" />
+            <img src={pill.imageUrl} alt={pill.name} className="max-h-full max-w-full object-contain" />
           ) : (
             <span className="text-[16px] font-bold" style={{ color: GRAY }}>이미지 없음</span>
           )}
         </div>
-        <p className="text-[24px] font-extrabold mt-4 leading-tight" style={{ color: BLACK }}>{pill.name}</p>
+      </div>
+
+      {/* 회색 카드: 약 이름 + 세부사항 + 기존 상세 섹션 유지 */}
+      <div
+        className="flex-1 px-5 pt-5 pb-4 rounded-t-[28px]"
+        style={{ backgroundColor: DETAIL_CARD_BG }}
+      >
+        <p className="text-[24px] font-extrabold leading-tight" style={{ color: BLACK }}>{pill.name}</p>
         {pill.entpName && <p className="text-[13px] mt-1" style={{ color: GRAY }}>{pill.entpName}</p>}
         {matchSourceLabel(pill.matchSource) && (
           <p className="text-[11px] font-bold mt-2 inline-block px-2 py-0.5 rounded-md" style={{ color: GREEN, backgroundColor: GREEN_BG }}>
             {matchSourceLabel(pill.matchSource)}
           </p>
         )}
-      </div>
 
-      {/* Details */}
-      <div className="px-4 pt-4">
-        <Card className="p-5">
-          <p className="text-[16px] font-extrabold mb-3" style={{ color: BLACK }}>세부사항</p>
+        <p className="text-[15px] font-bold mt-5 mb-3" style={{ color: GRAY2 }}>세부사항</p>
 
-          <Section title="1. 기본 정보">
-            <p className="text-[13px] leading-relaxed" style={{ color: GRAY2 }}>
-              <b>분류:</b> {pill.tag}
-            </p>
+        <Section title="1. 기본 정보">
+          <p className="text-[13px] leading-relaxed" style={{ color: GRAY2 }}>
+            <b>분류:</b> {pill.tag}
+          </p>
+        </Section>
+
+        <Section title="2. 복용 방법">
+          <p className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: GRAY2 }}>{pill.timing || "정보 없음"}</p>
+        </Section>
+
+        <Section title="3. 효과 및 효능">
+          <p className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: GRAY2 }}>{pill.effect || "정보 없음"}</p>
+        </Section>
+
+        <Section title="4. 주의사항">
+          <p className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: GRAY2 }}>{pill.caution || "정보 없음"}</p>
+        </Section>
+
+        {pill.durWarning && (
+          <Section title="5. 병용 금기">
+            <p className="text-[13px] leading-relaxed" style={{ color: RED }}>{pill.durWarning}</p>
           </Section>
+        )}
 
-          <Section title="2. 복용 방법">
-            <p className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: GRAY2 }}>{pill.timing || "정보 없음"}</p>
-          </Section>
+        <div className="pt-2 pb-2">
+          <FeedbackPanel pill={pill} />
+        </div>
 
-          <Section title="3. 효과 및 효능">
-            <p className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: GRAY2 }}>{pill.effect || "정보 없음"}</p>
-          </Section>
-
-          <Section title="4. 주의사항">
-            <p className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: GRAY2 }}>{pill.caution || "정보 없음"}</p>
-          </Section>
-
-          {pill.durWarning && (
-            <Section title="5. 병용 금기">
-              <p className="text-[13px] leading-relaxed" style={{ color: RED }}>{pill.durWarning}</p>
-            </Section>
-          )}
-        </Card>
-      </div>
-
-      <div className="px-4 pt-4 pb-2">
-        <FeedbackPanel pill={pill} />
-      </div>
-
-      <div className="px-4 pt-2 pb-4">
         <button
           onClick={() => { addToSchedule(pill); setRegistered(true); if (detailSource === "scan") speak("복용 관리에 등록되었습니다"); }}
-          className="w-full min-h-[52px] rounded-full font-bold text-[17px]"
-          style={{ backgroundColor: registered ? GREEN : RED, color: "#fff" }}
+          className="w-full min-h-[52px] rounded-2xl font-bold text-[17px] mt-2"
+          style={{ backgroundColor: registered ? GREEN : DETAIL_CTA_BG, color: "#fff" }}
         >
           {registered ? "복용 관리에 등록됨 ✓" : "복용 관리 등록하기"}
         </button>
@@ -2524,13 +2562,13 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
   }
 
   // ---- 목록 화면 ----
-  // ---- 목록 화면 ----
   return (
-    <div className="flex flex-col h-full overflow-y-auto pb-24" style={{ backgroundColor: BG }}>
+    <div className="flex flex-col h-full overflow-y-auto pb-28" style={{ backgroundColor: "#F5F5F7" }}>
       <div className="px-5 pt-6 pb-3 bg-white">
         <p className="text-[22px] font-extrabold text-center" style={{ color: BLACK }}>복용 관리</p>
       </div>
 
+      {/* 기존 처방전/약봉지 등록 로직·UI 유지 */}
       <div className="px-4 pt-4">
         <Card className="p-4">
           <p className="text-[16px] font-extrabold" style={{ color: BLACK }}>처방전 · 약봉지 등록</p>
@@ -2588,8 +2626,12 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
           {schedule.map((p) => {
             const taken = takenIds.includes(p.id);
             return (
-              <Card key={p.id} className="w-full flex items-center gap-3 px-4 py-3" style={{ opacity: taken ? 0.5 : 1 }}>
-                <div className="w-[60px] h-[60px] rounded-xl flex-shrink-0 overflow-hidden flex items-center justify-center" style={{ backgroundColor: "#F9FAFB" }}>
+              <div
+                key={p.id}
+                className="w-full flex items-center gap-3 px-4 py-3 rounded-2xl bg-white border"
+                style={{ borderColor: BORDER, opacity: taken ? 0.7 : 1 }}
+              >
+                <div className="w-[60px] h-[60px] rounded-xl flex-shrink-0 overflow-hidden flex items-center justify-center" style={{ backgroundColor: "#F3F4F6" }}>
                   {p.imageUrl ? (
                     <img src={p.imageUrl} alt={p.name} className="w-full h-full object-contain" />
                   ) : (
@@ -2597,23 +2639,27 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
                   )}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-[16px] font-bold leading-tight truncate" style={{ color: BLACK }}>{p.name}</p>
+                  <p className="text-[16px] font-extrabold leading-tight truncate" style={{ color: BLACK }}>{p.name}</p>
+                  <p className="text-[13px] mt-1 truncate" style={{ color: GRAY2 }}>
+                    {(p.timing || "복용법 정보 없음").slice(0, 28)}
+                  </p>
                   <p className="text-[12px] mt-0.5 truncate" style={{ color: GRAY }}>{p.tag}</p>
-                  <p className="text-[12px]" style={{ color: GRAY }}>{(p.timing || "").slice(0, 30)}</p>
                 </div>
-                <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                  <button
-                    onClick={() => toggleTaken(p.id)}
-                    className="min-h-[36px] px-3 rounded-full font-bold text-[13px] flex items-center gap-1"
-                    style={{
-                      backgroundColor: taken ? GREEN_BG : RED_LIGHT,
-                      color: taken ? GREEN : RED,
-                    }}
+                {/* 기존 takenIds/toggleTaken 상태 로직 유지 — 표시만 스펙형 상태 텍스트 */}
+                <button
+                  type="button"
+                  onClick={() => toggleTaken(p.id)}
+                  className="flex-shrink-0 max-w-[96px] text-right"
+                  aria-label={taken ? "복용 완료 취소" : "복용 체크"}
+                >
+                  <span
+                    className="text-[13px] font-extrabold leading-snug block"
+                    style={{ color: taken ? GREEN : BLACK }}
                   >
-                    {taken ? (<><Check size={14} /> 복용완료</>) : "복용 체크"}
-                  </button>
-                </div>
-              </Card>
+                    {taken ? "이미 복용했어요" : "복용 예정"}
+                  </span>
+                </button>
+              </div>
             );
           })}
         </div>
@@ -2652,7 +2698,9 @@ export default function App() {
             onCameraModeChange={setMgmtCamera}
           />
         )}
-        {screen !== "scan" && screen !== "feedbackStats" && !mgmtCamera && <BottomNav screen={screen} setScreen={setScreen} />}      </div>
+        {/* 스캔 화면에서도 하단 네비 표시 (중앙 스캔 버튼 활성 톤) */}
+        {screen !== "feedbackStats" && !mgmtCamera && <BottomNav screen={screen} setScreen={setScreen} />}
+      </div>
     </div>
   );
 }
