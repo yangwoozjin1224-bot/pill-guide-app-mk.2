@@ -50,9 +50,12 @@ export function scoreCandidateAgainstFeatures(item, features = {}) {
       bestImprint = Math.max(bestImprint, 100);
       reasons.push("imprint_exact");
       tier = "exact";
-    } else if (front.includes(m) || m.includes(front) || back.includes(m) || m.includes(back)) {
+    } else if (
+      (front.length >= 2 && (front.includes(m) || m.includes(front))) ||
+      (back.length >= 2 && (back.includes(m) || m.includes(back)))
+    ) {
       const ref =
-        front.includes(m) || m.includes(front) ? front || m : back || m;
+        front.length >= 2 && (front.includes(m) || m.includes(front)) ? front || m : back || m;
       const overlap = Math.min(m.length, ref.length) / Math.max(m.length, ref.length, 1);
       const s = Math.round(45 + 40 * overlap);
       if (s > bestImprint) {

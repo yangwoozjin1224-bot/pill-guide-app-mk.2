@@ -27,6 +27,7 @@ import { logRetrievalRun } from "./evaluate.js";
 import { logDetectionRun, logEndToEnd } from "../metrics.js";
 import { runImprintPipeline, getImprintPipelineConfig } from "../imprintPipeline.js";
 import { setCustomDetector } from "../detectors/index.js";
+import { getPrescriptionDrugs } from "../prescription/index.js";
 
 let externalDetector = null;
 
@@ -181,11 +182,15 @@ export async function runVisionSearch(sourceCanvas, options = {}) {
   const hints = bagHints.length ? bagHints : bagStructured?.drugNames || [];
 
   if (imprintPipeline !== false && !frontBack) {
+    const pool =
+      options.candidatePool ||
+      (typeof getPrescriptionDrugs === "function" ? getPrescriptionDrugs() : []);
     const out = await runImprintPipeline(sourceCanvas, {
       ...options,
       candidateFetcher,
       apiFetch,
       bagHints: hints,
+      candidatePool: pool,
       maxInstances,
       topK,
       useLlm,

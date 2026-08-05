@@ -13,15 +13,21 @@ import { detectInstances, setCustomDetector, getActiveDetectorId } from "./detec
 import { extractPillFeatures } from "./features/extract.js";
 import { matchFeaturesToDb } from "./match/dbMatch.js";
 import { fallbackMultimodalGuess } from "./match/fallbackLlm.js";
+import {
+  matchAgainstPrescriptionPool,
+  boostIfInPrescriptionPool,
+  getPrescriptionMatchMinConf,
+} from "./prescription/index.js";
 import { getOcrWorker } from "./ocr.js";
 import { logDetectionRun, logEndToEnd } from "./metrics.js";
 
 export function getImprintPipelineConfig() {
   return {
-    stages: ["segment", "extract", "match", "fallback"],
+    stages: ["segment", "extract", "match_prescription_pool", "match_full_db", "fallback"],
     detector: getActiveDetectorId(),
     cropMargin: 0.18,
     confidenceTiers: ["exact", "partial", "color_shape", "weak"],
+    prescriptionMinConf: getPrescriptionMatchMinConf(),
   };
 }
 
@@ -59,7 +65,7 @@ export async function stageFallback(cropCanvas, features, options = {}) {
   return fallbackMultimodalGuess(cropCanvas, features, options);
 }
 
-function toLegacyBest(candidate) {
+function toLegacyBest(candidate, matchSource) {
   if (!candidate?.item) return null;
   const item = candidate.item;
   return {
@@ -70,6 +76,7 @@ function toLegacyBest(candidate) {
     fusedScore: candidate.confidence,
     ocrScore: candidate.tier === "exact" ? 1 : candidate.tier === "partial" ? 0.7 : 0.3,
     matchTier: candidate.tier,
+    matchSource: matchSource || null,
   };
 }
 
@@ -80,11 +87,13 @@ function toLegacyBest(candidate) {
  * @param {object} options
  * @param {Function} options.apiFetch - async (query) => raw API items
  * @param {Function} [options.candidateFetcher] - legacy adapter; wrapped into apiFetch if needed
+ * @param {Array} [options.candidatePool] - prescription drugs (Phase 1 priority pool)
  */
 export async function runImprintPipeline(sourceCanvas, options = {}) {
   const {
     apiFetch,
     candidateFetcher,
+    candidatePool = [],
     maxInstances = 8,
     topK = 10,
     useLlm = true,
@@ -114,6 +123,11 @@ export async function runImprintPipeline(sourceCanvas, options = {}) {
   if (!fetchFn) {
     throw new Error("runImprintPipeline requires apiFetch or candidateFetcher");
   }
+
+  const pool =
+    candidatePool?.length > 0
+      ? candidatePool
+      : (bagHints || []).map((name) => ({ name, source: "bag_ocr" }));
 
   const segmented = await stageSegment(sourceCanvas, options);
   const detections = (segmented.detections || []).slice(0, maxInstances);
@@ -145,17 +159,46 @@ export async function runImprintPipeline(sourceCanvas, options = {}) {
       thoroughOcr: true,
     });
 
-    // Bag name hints as soft prior when imprint empty
-    if (!features.imprintFront && bagHints?.length) {
-      /* matching still color/shape; hints used if match empty via name pull below */
+    let matchSource = null;
+    let match = { candidates: [], empty: true, ambiguous: false };
+
+    // Phase 1: prescription pool first
+    if (pool.length) {
+      const poolHit = matchAgainstPrescriptionPool(features, pool, {
+        topK,
+        minConf: getPrescriptionMatchMinConf(),
+      });
+      if (!poolHit.empty && poolHit.matchSource === "prescription") {
+        match = {
+          candidates: poolHit.candidates,
+          empty: false,
+          ambiguous: poolHit.candidates[0]?.tier === "prescription_prior",
+          imprintUsed: Boolean(features.imprintFront),
+          features,
+        };
+        matchSource = "prescription";
+      }
     }
 
-    let match = await stageMatch(features, {
-      apiFetch: fetchFn,
-      topK,
-      allowColorShapeOnly: true,
-    });
+    // Fallback: full MFDS DB
+    if (match.empty) {
+      match = await stageMatch(features, {
+        apiFetch: fetchFn,
+        topK,
+        allowColorShapeOnly: true,
+      });
+      if (!match.empty) {
+        matchSource = "full_db";
+        if (pool.length) {
+          match = {
+            ...match,
+            candidates: boostIfInPrescriptionPool(match.candidates, pool),
+          };
+        }
+      }
+    }
 
+    // Legacy bag name pull if still empty
     if (match.empty && bagHints?.length) {
       const extra = [];
       for (const name of bagHints.slice(0, 3)) {
@@ -168,27 +211,30 @@ export async function runImprintPipeline(sourceCanvas, options = {}) {
           topK,
           useCache: false,
         });
-        // Re-run ranking only on bag results
-        match = {
-          ...match,
-          ambiguous: true,
-        };
+        if (!match.empty) {
+          matchSource = "prescription";
+          match = { ...match, ambiguous: true };
+        }
       }
     }
 
     let fallback = null;
-    let lowAccuracy = Boolean(match.ambiguous);
+    let lowAccuracy =
+      Boolean(match.ambiguous) ||
+      (matchSource === "prescription" && match.candidates[0]?.tier === "prescription_prior");
     if (match.empty && useFallbackLlm) {
       fallback = await stageFallback(det.cropCanvas, features, { fetcher: llmFetcher });
-      if (fallback) lowAccuracy = true;
+      if (fallback) {
+        lowAccuracy = true;
+        matchSource = "fallback_llm";
+      }
     }
 
     const candidates = match.candidates || [];
     const top = candidates[0] || null;
 
-    // Map fallback guesses into candidate-like rows for UI
     const fallbackCandidates =
-      fallback?.guesses?.map((g, gi) => ({
+      fallback?.guesses?.map((g) => ({
         name: g.name,
         itemSeq: "",
         confidence: g.confidence,
@@ -199,6 +245,7 @@ export async function runImprintPipeline(sourceCanvas, options = {}) {
       })) || [];
 
     const allCandidates = candidates.length ? candidates : fallbackCandidates;
+    const effectiveSource = candidates.length ? matchSource : fallback ? "fallback_llm" : null;
 
     results.push({
       id: det.id || `det_${i}`,
@@ -222,11 +269,14 @@ export async function runImprintPipeline(sourceCanvas, options = {}) {
         tier: c.tier,
         reasons: c.reasons,
         item: c.item,
+        matchSource: effectiveSource,
       })),
-      best: toLegacyBest(top) || (fallbackCandidates[0] ? toLegacyBest(fallbackCandidates[0]) : null),
+      best: toLegacyBest(top, effectiveSource) ||
+        (fallbackCandidates[0] ? toLegacyBest(fallbackCandidates[0], "fallback_llm") : null),
       top10: allCandidates.slice(0, 10),
       fusedConfidence: top?.confidence || fallbackCandidates[0]?.confidence || 0,
       matchTier: top?.tier || (fallback ? "fallback" : "none"),
+      matchSource: effectiveSource,
       ambiguous: match.ambiguous,
       lowAccuracy,
       warning: lowAccuracy ? fallback?.warning || "정확도가 낮을 수 있습니다" : null,
@@ -243,12 +293,14 @@ export async function runImprintPipeline(sourceCanvas, options = {}) {
     config: getImprintPipelineConfig(),
     pipeline: "imprint-db",
     bagHints,
+    candidatePoolSize: pool.length,
     debug: debug
       ? {
           boxes: results.map((r) => ({
             ...r.box,
             mark: r.mark,
             tier: r.matchTier,
+            matchSource: r.matchSource,
             fused: r.fusedConfidence,
           })),
           crops: results.map((r) => r.cropCanvas),

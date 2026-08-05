@@ -149,6 +149,20 @@ let sessionBagStructured = null;
 export function setSessionBagContext(structured) {
   sessionBagStructured = structured || null;
   sessionBagHints = structured?.drugNames || [];
+  // Phase 1: also persist PrescriptionContext (localStorage)
+  try {
+    // dynamic import avoided — sync bridge via optional global setter injected by App/pipeline
+    if (typeof setSessionBagContext._prescriptionBridge === "function") {
+      setSessionBagContext._prescriptionBridge(structured);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Wire PrescriptionContext without circular imports at module top */
+export function attachPrescriptionBridge(fn) {
+  setSessionBagContext._prescriptionBridge = fn;
 }
 
 export function getSessionBagHints() {

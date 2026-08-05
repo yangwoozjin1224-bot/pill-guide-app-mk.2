@@ -6,8 +6,19 @@ import {
   terminateOcrWorker,
   getSessionBagHints,
   setSessionBagContext,
+  getPrescriptionDrugs,
+  hasPrescriptionContext,
+  clearPrescriptionContext,
+  getPrescriptionDrugNames,
 } from "./vision/pipeline.js";
 import { formatMetricsSummary, getMetrics } from "./vision/metrics.js";
+
+function matchSourceLabel(source) {
+  if (source === "prescription") return "처방 목록 매칭";
+  if (source === "full_db") return "전체 DB 검색";
+  if (source === "fallback_llm") return "AI 추정(낮은 정확도)";
+  return null;
+}
 
 // ---- Design tokens (reference images) ----
 const RED = "#E53E3E";
@@ -798,12 +809,21 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           const seq = best.itemSeq || best.ITEM_SEQ;
           if (seq) {
             const detail = await fetchPillDetailBySeq(seq, best.name || best.itemName, schedule);
-            return { ...detail, detectedMark: r.mark, rerankScore: best.rerankScore };
+            return {
+              ...detail,
+              detectedMark: r.mark,
+              rerankScore: best.rerankScore,
+              matchSource: r.matchSource || best.matchSource || null,
+            };
           }
           return fetchPillData(
             { mark: r.mark, color: r.color, shape: r.shape },
             schedule
-          ).then((p) => ({ ...p, detectedMark: r.mark }));
+          ).then((p) => ({
+            ...p,
+            detectedMark: r.mark,
+            matchSource: r.matchSource || null,
+          }));
         })
       );
       if (cancelledRef.current) return true;
@@ -989,6 +1009,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           candidateFetcher,
           apiFetch: apiFetchPillIdentification,
           bagHints: getSessionBagHints(),
+          candidatePool: getPrescriptionDrugs(),
           frontBack: null,
           debug: debugMode,
           maxInstances: 6,
@@ -1005,6 +1026,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             candidateFetcher,
             apiFetch: apiFetchPillIdentification,
             bagHints: getSessionBagHints(),
+            candidatePool: getPrescriptionDrugs(),
             frontBack: {
               frontCanvas: frontCrop,
               backCanvas: pipelineResult.results[0].cropCanvas,
@@ -1162,6 +1184,17 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
                   <p className="text-[12px] mt-0.5 truncate" style={{ color: GRAY }}>
                     {[p.detectedMark && `표기 ${p.detectedMark}`, p.tag].filter(Boolean).join(" · ")}
                   </p>
+                  {matchSourceLabel(p.matchSource) ? (
+                    <p
+                      className="text-[11px] font-bold mt-1 inline-block px-2 py-0.5 rounded-md"
+                      style={{
+                        color: p.matchSource === "prescription" ? GREEN : GRAY2,
+                        backgroundColor: p.matchSource === "prescription" ? GREEN_BG : "#F3F4F6",
+                      }}
+                    >
+                      {matchSourceLabel(p.matchSource)}
+                    </p>
+                  ) : null}
                 </div>
                 <ChevronRight size={18} color={GRAY} />
               </Card>
@@ -1293,6 +1326,11 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             {detectedMarks.length > 0 && (status === "scanning" || status === "loading") && (
               <p className="text-[12px] mt-1" style={{ color: GRAY }}>
                 읽은 표기: {detectedMarks.join(", ")}
+              </p>
+            )}
+            {status === "scanning" && hasPrescriptionContext() && (
+              <p className="text-[12px] mt-1 font-bold" style={{ color: GREEN }}>
+                처방 목록 {getPrescriptionDrugNames().length}종 우선 매칭 중
               </p>
             )}
             {status === "scanning" && (
@@ -1787,6 +1825,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
           <p className="text-[16px] font-extrabold" style={{ color: BLACK }}>처방전 · 약봉지 등록</p>
           <p className="text-[13px] mt-1 leading-relaxed" style={{ color: GRAY2 }}>
             카메라를 켜고 촬영하면 약 이름을 읽어 복용 관리에 추가합니다.
+            등록된 처방 목록은 알약 인식 시 우선 매칭에 사용됩니다.
           </p>
           <button
             onClick={startCameraView}
@@ -1796,6 +1835,29 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
             <Camera size={18} />
             처방전 / 약봉지 촬영
           </button>
+          {hasPrescriptionContext() && (
+            <div className="mt-3">
+              <p className="text-[12px] font-bold" style={{ color: GREEN }}>
+                처방 목록 {getPrescriptionDrugNames().length}종 저장됨
+              </p>
+              <p className="text-[11px] mt-0.5 truncate" style={{ color: GRAY2 }}>
+                {getPrescriptionDrugNames().slice(0, 4).join(", ")}
+                {getPrescriptionDrugNames().length > 4 ? " …" : ""}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  clearPrescriptionContext();
+                  setFoundNames([]);
+                  setMsg("처방 목록을 지웠습니다.");
+                }}
+                className="mt-2 text-[12px] font-bold underline"
+                style={{ color: GRAY2 }}
+              >
+                처방 목록 지우기
+              </button>
+            </div>
+          )}
         </Card>
       </div>
 
