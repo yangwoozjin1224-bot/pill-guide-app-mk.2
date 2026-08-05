@@ -9,7 +9,6 @@ import {
   Volume2,
   Check,
   Plus,
-  MessageCircle,
   MoreHorizontal,
   Scan,
 } from "lucide-react";
@@ -62,7 +61,6 @@ const GREEN_BG = "#ECFDF5";
 const BLUE_CARD = "#EFF6FF";
 const SCAN_CARD_BG = "#E1DFFF";
 const SCAN_BUTTON_BG = "#7A5AF8";
-const SCAN_INACTIVE = "#C4B5FD";
 const MANAGE_CARD_BG = "#D5F2DE";
 const MANAGE_BUTTON_BG = "#34C759";
 const SEARCH_BG = "#F6F6F6";
@@ -444,25 +442,22 @@ function Card({ children, className = "", style = {}, onClick }) {
 }
 
 function BottomNav({ screen, setScreen }) {
-  // 스펙: 홈 / + / 중앙 스캔 / 시계 / 말풍선
-  // + 는 기존 약 찾기(search) 네비게이션 로직 유지
-  const leftItems = [
-    { key: "home", icon: Home },
-    { key: "search", icon: Plus },
-  ];
-  const rightItems = [
-    { key: "management", icon: Clock },
-    { key: "chat", icon: MessageCircle, noop: true },
+  // 홈 / +(약 찾기) / 촬영 / 복용 관리 — 동일 형태, 활성 시 검정 강조
+  const items = [
+    { key: "home", icon: Home, label: "홈" },
+    { key: "search", icon: Plus, label: "약 찾기" },
+    { key: "scan", icon: Scan, label: "촬영" },
+    { key: "management", icon: Clock, label: "복용 관리" },
   ];
   const muted = "#A8B3C4";
-  const scanActive = screen === "scan";
+  const activeColor = BLACK;
 
   return (
     <div
-      className="absolute bottom-0 left-0 right-0 bg-white border-t flex items-end justify-around px-2 pt-2 pb-3 z-20"
+      className="absolute bottom-0 left-0 right-0 bg-white border-t flex items-center justify-around px-2 pt-2 pb-3 z-20"
       style={{ borderColor: BORDER }}
     >
-      {leftItems.map((it) => {
+      {items.map((it) => {
         const Icon = it.icon;
         const active = screen === it.key;
         return (
@@ -470,35 +465,13 @@ function BottomNav({ screen, setScreen }) {
             key={it.key}
             onClick={() => setScreen(it.key)}
             className="flex items-center justify-center w-12 h-12"
-            aria-label={it.key}
+            aria-label={it.label}
           >
-            <Icon size={26} color={active ? "#4B5563" : muted} strokeWidth={active ? 2.4 : 2} />
-          </button>
-        );
-      })}
-
-      <button
-        onClick={() => setScreen("scan")}
-        className="flex items-center justify-center w-[64px] h-[64px] rounded-full -mt-6 shadow-lg"
-        style={{ backgroundColor: scanActive ? SCAN_BUTTON_BG : SCAN_INACTIVE }}
-        aria-label="촬영"
-      >
-        <Scan size={28} color="#FFFFFF" strokeWidth={2.4} />
-      </button>
-
-      {rightItems.map((it) => {
-        const Icon = it.icon;
-        const active = screen === it.key;
-        return (
-          <button
-            key={it.key}
-            onClick={() => {
-              if (!it.noop) setScreen(it.key);
-            }}
-            className="flex items-center justify-center w-12 h-12"
-            aria-label={it.key}
-          >
-            <Icon size={26} color={active ? "#4B5563" : muted} strokeWidth={active ? 2.4 : 2} />
+            <Icon
+              size={26}
+              color={active ? activeColor : muted}
+              strokeWidth={active ? 2.6 : 2}
+            />
           </button>
         );
       })}
