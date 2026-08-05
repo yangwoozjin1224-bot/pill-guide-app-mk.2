@@ -10,6 +10,8 @@ import {
   hasPrescriptionContext,
   clearPrescriptionContext,
   getPrescriptionDrugNames,
+  evaluateCaptureQuality,
+  createMessageThrottle,
 } from "./vision/pipeline.js";
 import { formatMetricsSummary, getMetrics } from "./vision/metrics.js";
 
@@ -667,6 +669,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   const [frontCrop, setFrontCrop] = useState(null);
   const [captureSide, setCaptureSide] = useState("front"); // front | back
   const [accuracyWarning, setAccuracyWarning] = useState("");
+  const [qualityHint, setQualityHint] = useState("");
+  const [qualityOk, setQualityOk] = useState(true);
   const cancelledRef = useRef(false);
   const processingRef = useRef(false);
   const videoRef = useRef(null);
@@ -976,6 +980,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     let totalTries = 0;
     let lastMarkKey = "";
     let confirmCount = 0;
+    const throttleMsg = createMessageThrottle(400);
 
     const fail = (msg) => {
       stopped = true;
@@ -998,9 +1003,30 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         return;
       }
 
+      // Phase 2: on-device quality gate BEFORE any API/OCR pipeline
+      const quality = evaluateCaptureQuality(frame, { mode: "pill" });
+      setQualityOk(quality.ok);
+      if (!quality.ok) {
+        const text = quality.messages[0] || "초점을 맞춰 주세요";
+        const shown = throttleMsg(text);
+        if (shown) setQualityHint(shown);
+        if (quality.softWarnings?.length) {
+          /* soft only */
+        }
+        timerId = setTimeout(tick, 220);
+        return;
+      }
+      if (quality.softWarnings?.length) {
+        const soft = throttleMsg(quality.softWarnings[0]);
+        if (soft) setQualityHint(soft);
+      } else {
+        const okMsg = throttleMsg("좋아요. 인식 중…");
+        if (okMsg) setQualityHint(okMsg);
+      }
+
       totalTries += 1;
-      if (totalTries > 14) {
-        fail("알약 인식에 실패했습니다. 각인(글자)이 보이게 가까이 찍거나, 표기를 직접 입력해주세요.");
+      if (totalTries > 20) {
+        fail("알약 인식에 실패했습니다. 각인(글자)이 보이게 가까이 비추거나, 표기를 직접 입력해주세요.");
         return;
       }
 
@@ -1262,7 +1288,13 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           <div
             className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[280px] h-[280px] rounded-3xl overflow-hidden"
             style={{
-              border: `3px solid ${status === "loading" ? "#34D399" : "rgba(255,255,255,0.75)"}`,
+              border: `3px solid ${
+                status === "loading"
+                  ? "#34D399"
+                  : qualityOk
+                    ? "rgba(52, 211, 153, 0.95)"
+                    : "rgba(251, 191, 36, 0.95)"
+              }`,
               boxShadow: "0 0 0 9999px rgba(0,0,0,0.4)",
             }}
           >
@@ -1333,13 +1365,24 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
                 처방 목록 {getPrescriptionDrugNames().length}종 우선 매칭 중
               </p>
             )}
+            {status === "scanning" && qualityHint && (
+              <p
+                className="text-[13px] mt-2 font-bold leading-relaxed px-3 py-1.5 rounded-lg inline-block"
+                style={{
+                  color: qualityOk ? "#065F46" : "#92400E",
+                  backgroundColor: qualityOk ? "#D1FAE5" : "#FEF3C7",
+                }}
+              >
+                {qualityHint}
+              </p>
+            )}
             {status === "scanning" && (
               <p className="text-[12px] mt-2 leading-relaxed" style={{ color: GRAY2 }}>
                 {dualMode
                   ? captureSide === "back"
                     ? "앞면을 저장했습니다. 이제 뒷면 각인을 맞춰 주세요"
                     : "앞면+뒷면 모드: 먼저 앞면 각인을 맞춰 주세요"
-                  : "Vision Search: 알약 글자(각인)가 선명하게 보이도록 가까이 맞춰 주세요"}
+                  : "흰 배경에 알약을 펼치고 카메라에 맞추세요 (QR처럼 자동 인식, 셔터 없음)"}
               </p>
             )}
           </div>
@@ -1474,13 +1517,17 @@ function Section({ title, children }) {
 function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChange }) {
   const [takenIds, setTakenIds] = useState([]);
   const [view, setView] = useState("list"); // list | camera
-  const [status, setStatus] = useState("ready"); // ready | reading | looking | done | error
+  const [status, setStatus] = useState("ready"); // scanning | reading | looking | done | error
   const [msg, setMsg] = useState("");
   const [foundNames, setFoundNames] = useState([]);
   const [cameraError, setCameraError] = useState("");
   const [snapUrl, setSnapUrl] = useState("");
+  const [qualityHint, setQualityHint] = useState("");
+  const [qualityOk, setQualityOk] = useState(true);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const bagBusyRef = useRef(false);
+  const bagCancelRef = useRef(false);
 
   const toggleTaken = (id) => setTakenIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
@@ -1524,12 +1571,31 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
     }
   };
 
+  const captureBagFrame = () => {
+    const video = videoRef.current;
+    if (!video?.videoWidth) return null;
+    const canvas = document.createElement("canvas");
+    // Prefer upright document-ish crop: full frame scaled
+    const maxSide = 1280;
+    const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  };
+
   const startCameraView = async () => {
     setView("camera");
     onCameraModeChange?.(true);
-    setStatus("ready");
+    setStatus("scanning");
     setMsg("");
     setFoundNames([]);
+    setQualityHint("처방전/약봉지를 안내선 안에 맞춰 주세요");
+    setQualityOk(true);
+    bagCancelRef.current = false;
+    bagBusyRef.current = false;
     if (snapUrl) {
       URL.revokeObjectURL(snapUrl);
       setSnapUrl("");
@@ -1538,6 +1604,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
   };
 
   const backToList = () => {
+    bagCancelRef.current = true;
     stopCamera();
     setView("list");
     onCameraModeChange?.(false);
@@ -1545,6 +1612,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
     setMsg("");
     setFoundNames([]);
     setCameraError("");
+    setQualityHint("");
     if (snapUrl) {
       URL.revokeObjectURL(snapUrl);
       setSnapUrl("");
@@ -1553,6 +1621,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
 
   useEffect(() => {
     return () => {
+      bagCancelRef.current = true;
       stopCamera();
       onCameraModeChange?.(false);
     };
@@ -1682,36 +1751,114 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
     }
   };
 
-  const takePhoto = async () => {
-    const video = videoRef.current;
-    if (!video || !video.videoWidth) {
-      setStatus("error");
-      setMsg("카메라가 아직 준비되지 않았습니다.");
-      return;
-    }
+  // Phase 2: live QR-style bag/prescription recognition (no shutter)
+  useEffect(() => {
+    if (view !== "camera" || cameraError) return;
+    if (status !== "scanning") return;
 
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    bagCancelRef.current = false;
+    let timerId = null;
+    let lastKey = "";
+    let confirmCount = 0;
+    const throttleMsg = createMessageThrottle(450);
 
-    // 미리보기용
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-      if (snapUrl) URL.revokeObjectURL(snapUrl);
-      setSnapUrl(URL.createObjectURL(blob));
-    }, "image/jpeg", 0.9);
+    const tick = async () => {
+      if (bagCancelRef.current || bagBusyRef.current) return;
+      if (!videoRef.current?.videoWidth) {
+        timerId = setTimeout(tick, 200);
+        return;
+      }
 
-    stopCamera();
-    await processCapturedCanvas(canvas);
-  };
+      const frame = captureBagFrame();
+      if (!frame) {
+        timerId = setTimeout(tick, 200);
+        return;
+      }
+
+      const quality = evaluateCaptureQuality(frame, { mode: "document" });
+      setQualityOk(quality.ok);
+      if (!quality.ok) {
+        const textMsg = quality.messages[0] || "초점을 맞춰 주세요";
+        const shown = throttleMsg(textMsg);
+        if (shown) setQualityHint(shown);
+        timerId = setTimeout(tick, 280);
+        return;
+      }
+
+      const okHint = throttleMsg("좋아요. 글자를 읽는 중…");
+      if (okHint) setQualityHint(okHint);
+
+      bagBusyRef.current = true;
+      try {
+        const docResult = await recognizeDocumentPipeline(frame, {
+          searchFn: async (name) => {
+            const list = await searchPillList(name);
+            return list.map((it) => ({
+              ...it,
+              ITEM_NAME: it.name,
+              ITEM_SEQ: it.itemSeq,
+            }));
+          },
+          debug: false,
+        });
+        if (bagCancelRef.current) return;
+
+        const names = (docResult.drugNames || []).filter(Boolean);
+        const items = docResult.items || [];
+        if (!names.length && !items.length) {
+          timerId = setTimeout(tick, 700);
+          return;
+        }
+
+        const key = (names.length ? names : items.map((it) => it._matchedName || it.name || it.ITEM_NAME))
+          .slice(0, 6)
+          .join("|");
+        if (key && key === lastKey) confirmCount += 1;
+        else {
+          lastKey = key;
+          confirmCount = 1;
+        }
+        setFoundNames(names.length ? names : items.map((it) => it._matchedName || it.name || it.ITEM_NAME));
+
+        if (confirmCount >= 2) {
+          bagCancelRef.current = true;
+          frame.toBlob((blob) => {
+            if (!blob) return;
+            setSnapUrl((prev) => {
+              if (prev) URL.revokeObjectURL(prev);
+              return URL.createObjectURL(blob);
+            });
+          }, "image/jpeg", 0.85);
+          stopCamera();
+          await processCapturedCanvas(frame);
+          return;
+        }
+
+        const wait = throttleMsg(`약 이름 확인 중… (${confirmCount}/2)`);
+        if (wait) setQualityHint(wait);
+      } catch (e) {
+        console.warn("[bag-live]", e);
+      } finally {
+        bagBusyRef.current = false;
+      }
+      if (!bagCancelRef.current) timerId = setTimeout(tick, 750);
+    };
+
+    timerId = setTimeout(tick, 400);
+    return () => {
+      bagCancelRef.current = true;
+      if (timerId) clearTimeout(timerId);
+    };
+  }, [view, cameraError, status]);
 
   const retake = async () => {
-    setStatus("ready");
+    bagCancelRef.current = false;
+    bagBusyRef.current = false;
+    setStatus("scanning");
     setMsg("");
     setFoundNames([]);
+    setQualityHint("처방전/약봉지를 안내선 안에 맞춰 주세요");
+    setQualityOk(true);
     if (snapUrl) {
       URL.revokeObjectURL(snapUrl);
       setSnapUrl("");
@@ -1719,21 +1866,22 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
     await openCamera();
   };
 
-  // ---- 카메라 촬영 화면 (실시간 인식 X, 버튼으로 1장 촬영) ----
+  // ---- 카메라: 실시간 인식 (QR 스타일, 셔터 없음) ----
   if (view === "camera") {
     const busy = status === "reading" || status === "looking";
+    const live = status === "scanning";
     return (
       <div className="flex flex-col h-full" style={{ backgroundColor: "#000" }}>
         <div className="px-4 pt-5 pb-3 flex items-center gap-3">
           <button onClick={backToList} className="w-[40px] h-[40px] flex items-center justify-center">
             <ChevronLeft size={28} color="#fff" />
           </button>
-          <p className="text-[18px] font-bold text-white">처방전 / 약봉지 촬영</p>
+          <p className="text-[18px] font-bold text-white">처방전 / 약봉지 인식</p>
         </div>
 
         <div className="flex-1 relative overflow-hidden">
-          {snapUrl && status !== "ready" ? (
-            <img src={snapUrl} alt="촬영 사진" className="absolute inset-0 w-full h-full object-cover" />
+          {snapUrl && status !== "scanning" ? (
+            <img src={snapUrl} alt="인식 사진" className="absolute inset-0 w-full h-full object-cover" />
           ) : (
             <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover" />
           )}
@@ -1749,27 +1897,41 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
                 다시 시도
               </button>
             </div>
-          ) : status === "ready" ? (
+          ) : live || busy ? (
             <div
               className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[280px] h-[360px] rounded-2xl"
-              style={{ border: "3px solid rgba(255,255,255,0.75)", boxShadow: "0 0 0 9999px rgba(0,0,0,0.35)" }}
+              style={{
+                border: `3px solid ${
+                  busy ? "#34D399" : qualityOk ? "rgba(52, 211, 153, 0.95)" : "rgba(251, 191, 36, 0.95)"
+                }`,
+                boxShadow: "0 0 0 9999px rgba(0,0,0,0.35)",
+              }}
             />
           ) : null}
         </div>
 
         <div className="px-5 py-4" style={{ backgroundColor: CARD }}>
-          {status === "ready" && (
+          {live && (
             <>
-              <p className="text-[14px] text-center font-bold mb-3" style={{ color: BLACK }}>
-                처방전/약봉지를 맞춘 뒤 촬영하세요
+              <p className="text-[14px] text-center font-bold mb-2" style={{ color: BLACK }}>
+                QR처럼 비추기만 하면 자동으로 읽습니다
               </p>
-              <button
-                onClick={takePhoto}
-                className="w-full min-h-[52px] rounded-full font-bold text-[17px]"
-                style={{ backgroundColor: RED, color: "#fff" }}
-              >
-                촬영하기
-              </button>
+              {qualityHint && (
+                <p
+                  className="text-[13px] text-center font-bold mb-2 px-3 py-2 rounded-xl"
+                  style={{
+                    color: qualityOk ? "#065F46" : "#92400E",
+                    backgroundColor: qualityOk ? "#D1FAE5" : "#FEF3C7",
+                  }}
+                >
+                  {qualityHint}
+                </p>
+              )}
+              {foundNames.length > 0 && (
+                <p className="text-[12px] text-center" style={{ color: GRAY }}>
+                  읽는 중: {foundNames.slice(0, 4).join(", ")}
+                </p>
+              )}
             </>
           )}
 
@@ -1797,7 +1959,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
                 className="w-full min-h-[48px] rounded-full font-bold text-[16px] mb-2"
                 style={{ backgroundColor: RED, color: "#fff" }}
               >
-                다시 촬영하기
+                다시 인식하기
               </button>
               <button
                 onClick={backToList}
@@ -1814,6 +1976,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
   }
 
   // ---- 목록 화면 ----
+  // ---- 목록 화면 ----
   return (
     <div className="flex flex-col h-full overflow-y-auto pb-24" style={{ backgroundColor: BG }}>
       <div className="px-5 pt-6 pb-3 bg-white">
@@ -1824,7 +1987,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
         <Card className="p-4">
           <p className="text-[16px] font-extrabold" style={{ color: BLACK }}>처방전 · 약봉지 등록</p>
           <p className="text-[13px] mt-1 leading-relaxed" style={{ color: GRAY2 }}>
-            카메라를 켜고 촬영하면 약 이름을 읽어 복용 관리에 추가합니다.
+            카메라를 비추면 약 이름을 실시간으로 읽어 복용 관리에 추가합니다.
             등록된 처방 목록은 알약 인식 시 우선 매칭에 사용됩니다.
           </p>
           <button
@@ -1833,7 +1996,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
             style={{ backgroundColor: RED, color: "#fff" }}
           >
             <Camera size={18} />
-            처방전 / 약봉지 촬영
+            처방전 / 약봉지 실시간 인식
           </button>
           {hasPrescriptionContext() && (
             <div className="mt-3">

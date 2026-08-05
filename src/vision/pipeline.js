@@ -42,6 +42,13 @@ export {
 } from "./prescription/index.js";
 
 export {
+  evaluateCaptureQuality,
+  createMessageThrottle,
+  isQualityGateEnabled,
+  getQualityThresholds,
+} from "./quality/index.js";
+
+export {
   recognizeMedicineBag as recognizeDocumentPipeline,
   setSessionBagContext,
   getSessionBagHints,
