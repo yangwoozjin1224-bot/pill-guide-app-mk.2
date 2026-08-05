@@ -6,6 +6,7 @@ import {
   Clock,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Volume2,
   Check,
   Plus,
@@ -402,18 +403,85 @@ async function fetchPillData(params = {}, currentSchedule = []) {
   };
 }
 
+// 카테고리별 대표 일반의약품 (아코디언 노출용). 탭 시 e약은요/낱알식별 API로 상세 조회
 const CATEGORIES = [
-  { label: "가래 / 몸살", subtitle: "종합감기약, 기침, 콧물약", emoji: "🤒", q: "감기" },
-  { label: "두통 / 치통", subtitle: "해열진통제, 빠른 통증 완화약", emoji: "🤕", q: "두통" },
-  { label: "생리통 / 통증", subtitle: "생리통 전용 진통제, 여성 진통제", emoji: "😣", q: "생리통" },
-  { label: "소화불량 / 위통", subtitle: "소화제, 위산분비억제제, 제산제", emoji: "🤢", q: "소화불량" },
-  { label: "근육통 / 관절염", subtitle: "소염진통제, 바르는 겔, 붙이는 파스류", emoji: "💪", q: "근육통" },
-  { label: "비염 / 알레르기", subtitle: "항히스타민제, 코 스프레이", emoji: "🤧", q: "알레르기" },
-  { label: "상처 / 피부질환", subtitle: "연고, 습윤밴드, 두드러기 약", emoji: "🩹", q: "피부" },
-  { label: "눈 건강 / 안약", subtitle: "인공눈물, 충혈 완화제, 다래끼 약", emoji: "👁️", q: "안약" },
-  { label: "만성질환 / 처방약", subtitle: "혈압, 당뇨 등 정기 복용약 관리용", emoji: "🏥", q: "고혈압" },
-  { label: "피로회복 / 비타민", subtitle: "종합 비타민, 피로회복제, 영양제", emoji: "🔋", q: "비타민" },
-  { label: "유산균 / 장 건강", subtitle: "프로바이오틱스, 정장제, 지사제", emoji: "🌀", q: "유산균" },
+  {
+    label: "가래 / 몸살",
+    subtitle: "종합감기약, 기침, 콧물약",
+    emoji: "🤒",
+    q: "감기",
+    items: ["판콜에이", "화이투벤", "콜대원콜드", "씨콜드", "테라플루", "판피린큐", "모드콜에스", "그날엔코프", "타쎄론", "코푸시럽"],
+  },
+  {
+    label: "두통 / 치통",
+    subtitle: "해열진통제, 빠른 통증 완화약",
+    emoji: "🤕",
+    q: "두통",
+    items: ["타이레놀", "게보린", "펜잘큐", "이지엔6", "사리돈에이", "낙센", "부루펜", "애드빌", "탁센", "타이레놀콜드"],
+  },
+  {
+    label: "생리통 / 통증",
+    subtitle: "생리통 전용 진통제, 여성 진통제",
+    emoji: "😣",
+    q: "생리통",
+    items: ["이지엔6이브", "우먼스타이레놀", "낙센", "게보린소프트", "펜잘레이디", "부루펜", "애드빌", "탁센", "사리돈에이", "그날엔큐"],
+  },
+  {
+    label: "소화불량 / 위통",
+    subtitle: "소화제, 위산분비억제제, 제산제",
+    emoji: "🤢",
+    q: "소화불량",
+    items: ["훼스탈플러스", "베아제", "알마겔", "개비스콘", "겔포스엠", "까스활명수", "활명수", "닥터베아제", "배롱정", "가스모틴"],
+  },
+  {
+    label: "근육통 / 관절염",
+    subtitle: "소염진통제, 바르는 겔, 붙이는 파스류",
+    emoji: "💪",
+    q: "근육통",
+    items: ["케토톱", "볼타렌이멀겔", "신신파스", "안티푸라민", "멘소래담", "제놀쿨", "제일파프", "트라스트", "신신파스아렉스", "제일핫파프"],
+  },
+  {
+    label: "비염 / 알레르기",
+    subtitle: "항히스타민제, 코 스프레이",
+    emoji: "🤧",
+    q: "알레르기",
+    items: ["지르텍", "클라리틴", "알레그라", "씨잘", "세티르다", "액티피드", "코미나", "나잘크롬", "오트리빈", "알레르기엔"],
+  },
+  {
+    label: "상처 / 피부질환",
+    subtitle: "연고, 습윤밴드, 두드러기 약",
+    emoji: "🩹",
+    q: "피부",
+    items: ["후시딘", "마데카솔", "대일밴드", "메디폼", "베타딘", "티로신연고", "센텔라연고", "포비돈", "습윤밴드", "에스로반"],
+  },
+  {
+    label: "눈 건강 / 안약",
+    subtitle: "인공눈물, 충혈 완화제, 다래끼 약",
+    emoji: "👁️",
+    q: "안약",
+    items: ["리프레쉬플러스", "아이클리어", "히아레인", "토비콤", "비누실", "클리어린", "누넥스", "네이처아이", "오큐메드", "아이톡"],
+  },
+  {
+    label: "만성질환 / 처방약",
+    subtitle: "혈압, 당뇨 등 정기 복용약 관리용",
+    emoji: "🏥",
+    q: "고혈압",
+    items: ["아스피린프로텍트", "플라빅스", "다이크로짓", "아마릴", "자누비아", "메트포르민", "아모디핀", "코자", "리피토", "크레스토"],
+  },
+  {
+    label: "피로회복 / 비타민",
+    subtitle: "종합 비타민, 피로회복제, 영양제",
+    emoji: "🔋",
+    q: "비타민",
+    items: ["삐콤씨", "아로나민골드", "센트룸", "우루사", "고려은단비타민C", "임팩타민", "비맥스메타", "오남마이비타", "박카스", "메가마인드"],
+  },
+  {
+    label: "유산균 / 장 건강",
+    subtitle: "프로바이오틱스, 정장제, 지사제",
+    emoji: "🌀",
+    q: "유산균",
+    items: ["스멕타", "정로환", "로페린", "둘코락스", "락토핏", "듀오락", "메디락", "람노스", "마그밀", "비오플"],
+  },
 ];
 
 function speak(text) {
@@ -668,6 +736,8 @@ function SearchScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [results, setResults] = useState([]);
+  // 모바일에서 한 카테고리만 펼치는 편이 스크롤이 짧아 보기 쉬움
+  const [openLabel, setOpenLabel] = useState(CATEGORIES[0]?.label || null);
 
   const runSearch = async (name) => {
     const q = String(name || "").trim();
@@ -702,6 +772,57 @@ function SearchScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     } finally { setLoading(false); }
   };
 
+  // 대표 품목 탭 → e약은요/낱알식별 검색 후 상세로 연결 (기존 파이프라인 재사용)
+  const openRepresentative = async (name, categoryLabel) => {
+    const q = String(name || "").trim();
+    if (!q) return;
+    setErrorMsg("");
+    setLoading(true);
+    try {
+      const list = await searchPillList(q);
+      if (list?.[0]) {
+        const detail = await fetchPillDetailBySeq(list[0].itemSeq, list[0].name, schedule).catch(() => null);
+        setDetailSource("search");
+        setActivePill(
+          detail || {
+            id: list[0].itemSeq,
+            itemSeq: list[0].itemSeq,
+            name: list[0].name,
+            tag: list[0].tag || categoryLabel || "일반의약품",
+            time: "처방 정보 확인",
+            timing: list[0].timing || "복용법 정보 없음",
+            effect: list[0].effect || "정보 없음",
+            caution: list[0].caution || "주의사항 정보 없음",
+            durWarning: null,
+            imageUrl: list[0].imageUrl || "",
+          }
+        );
+        setScreen("detail");
+        return;
+      }
+      // API 결과 없을 때에도 상세 화면으로 이동 (빈 상세 구조 유지)
+      setDetailSource("search");
+      setActivePill({
+        id: `rep-${q}`,
+        name: q,
+        tag: categoryLabel || "일반의약품",
+        time: "처방 정보 확인",
+        timing: "제품 설명서의 용법·용량을 확인하세요",
+        effect: "공공 API에서 상세 정보를 찾지 못했습니다. 상단 검색으로 다시 찾아보세요.",
+        caution: "의사·약사와 상담 후 복용하세요",
+        durWarning: null,
+        imageUrl: "",
+      });
+      setScreen("detail");
+    } catch (err) {
+      setErrorMsg(err.message || "약 정보를 불러오지 못했습니다");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const showResults = results.length > 0;
+
   return (
     <div className="flex flex-col h-full pb-28" style={{ backgroundColor: BG }}>
       {/* Header: 뒤로가기 + 중앙 제목 */}
@@ -723,7 +844,13 @@ function SearchScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         >
           <input
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              if (!e.target.value.trim()) {
+                setResults([]);
+                setErrorMsg("");
+              }
+            }}
             onKeyDown={(e) => { if (e.key === "Enter" && query.trim()) runSearch(query); }}
             placeholder="약의 이름이나 형태, 효능군 등을 입력해주세요"
             className="flex-1 text-[14px] outline-none bg-transparent"
@@ -737,35 +864,20 @@ function SearchScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         {errorMsg && !loading && <p className="text-[14px] mt-2 text-center" style={{ color: GRAY2 }}>{errorMsg}</p>}
       </div>
 
-      {/* Categories or results */}
-      {!results.length && !loading ? (
-        <div className="px-4 pt-4 overflow-y-auto">
-          <div className="grid grid-cols-2 gap-3">
-            {CATEGORIES.map((c) => (
-              <div
-                key={c.label}
-                className="relative rounded-2xl border bg-white p-3 min-h-[132px] flex flex-col items-start text-left"
-                style={{ borderColor: BORDER }}
-              >
-                <span className="text-[28px] leading-none">{c.emoji}</span>
-                <p className="text-[14px] font-extrabold mt-2 leading-tight" style={{ color: BLACK }}>{c.label}</p>
-                <p className="text-[11px] mt-1 leading-snug pr-8" style={{ color: GRAY }}>{c.subtitle}</p>
-                <button
-                  type="button"
-                  onClick={() => { setQuery(c.q); runSearch(c.q); }}
-                  className="absolute bottom-3 right-3 w-8 h-8 rounded-lg flex items-center justify-center"
-                  style={{ backgroundColor: SCAN_BUTTON_BG }}
-                  aria-label={`${c.label} 검색`}
-                >
-                  <Plus size={18} color="#fff" strokeWidth={2.6} />
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : (
+      {/* 검색 결과 또는 카테고리 아코디언 */}
+      {showResults ? (
         <div className="px-4 pt-3 overflow-y-auto flex-1">
-          <p className="text-[13px] font-bold mb-2" style={{ color: GRAY }}>검색 결과 {results.length}건</p>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-[13px] font-bold" style={{ color: GRAY }}>검색 결과 {results.length}건</p>
+            <button
+              type="button"
+              onClick={() => { setResults([]); setErrorMsg(""); }}
+              className="text-[12px] font-bold"
+              style={{ color: SCAN_BUTTON_BG }}
+            >
+              카테고리 보기
+            </button>
+          </div>
           <div className="flex flex-col gap-2 pb-4">
             {results.map((p) => (
               <Card key={p.id} className="w-full flex items-center gap-3 px-3 py-3 text-left" onClick={() => openDetail(p)}>
@@ -783,6 +895,75 @@ function SearchScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
                 <ChevronRight size={18} color={GRAY} />
               </Card>
             ))}
+          </div>
+        </div>
+      ) : (
+        <div className="px-4 pt-4 overflow-y-auto flex-1">
+          <p className="text-[13px] font-bold mb-3" style={{ color: GRAY2 }}>카테고리별 대표 약</p>
+          <div className="flex flex-col gap-2 pb-4">
+            {CATEGORIES.map((c) => {
+              const open = openLabel === c.label;
+              return (
+                <div
+                  key={c.label}
+                  className="rounded-2xl border bg-white overflow-hidden"
+                  style={{ borderColor: BORDER }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setOpenLabel(open ? null : c.label)}
+                    className="w-full flex items-center gap-3 px-4 py-3.5 text-left"
+                    aria-expanded={open}
+                  >
+                    <span className="text-[24px] leading-none">{c.emoji}</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[15px] font-extrabold" style={{ color: BLACK }}>{c.label}</p>
+                      <p className="text-[11px] mt-0.5 truncate" style={{ color: GRAY }}>{c.subtitle}</p>
+                    </div>
+                    <ChevronDown
+                      size={20}
+                      color={GRAY2}
+                      className={`flex-shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
+                    />
+                  </button>
+
+                  {open && (
+                    <div className="px-3 pb-3 border-t" style={{ borderColor: BORDER, backgroundColor: "#FAFAFB" }}>
+                      <div className="flex flex-col gap-1.5 pt-2">
+                        {(c.items || []).map((name) => (
+                          <button
+                            key={name}
+                            type="button"
+                            disabled={loading}
+                            onClick={() => openRepresentative(name, c.label)}
+                            className="w-full flex items-center gap-3 px-2.5 py-2.5 rounded-xl bg-white border text-left active:scale-[0.99] transition-transform"
+                            style={{ borderColor: BORDER }}
+                          >
+                            <div
+                              className="w-10 h-10 rounded-xl flex-shrink-0 flex items-center justify-center text-[18px]"
+                              style={{ backgroundColor: "#F3F4F6" }}
+                              aria-hidden="true"
+                            >
+                              💊
+                            </div>
+                            <p className="flex-1 text-[14px] font-bold truncate" style={{ color: BLACK }}>{name}</p>
+                            <ChevronRight size={16} color={GRAY} />
+                          </button>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => { setQuery(c.q); runSearch(c.q); }}
+                        className="w-full mt-2 min-h-[40px] rounded-xl text-[13px] font-bold"
+                        style={{ color: SCAN_BUTTON_BG, backgroundColor: "#F3EEFF" }}
+                      >
+                        ‘{c.q}’ 전체 검색
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
