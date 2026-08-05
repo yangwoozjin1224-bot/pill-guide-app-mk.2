@@ -67,6 +67,12 @@ export {
 } from "./ensemble/index.js";
 
 export {
+  SmartStillCapture,
+  getSmartStillConfig,
+  shouldCaptureAtPrevious,
+} from "./capture/index.js";
+
+export {
   recognizeMedicineBag as recognizeDocumentPipeline,
   setSessionBagContext,
   getSessionBagHints,

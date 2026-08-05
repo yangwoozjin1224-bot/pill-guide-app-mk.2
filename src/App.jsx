@@ -22,8 +22,11 @@ import {
   EnsembleBuffer,
   fuseEnsembleVotes,
   buildEnsemblePipelineResult,
+  SmartStillCapture,
+  getSmartStillConfig,
 } from "./vision/pipeline.js";
 import { formatMetricsSummary, getMetrics } from "./vision/metrics.js";
+import { detectInstances } from "./vision/detectors/index.js";
 
 function matchSourceLabel(source) {
   if (source === "prescription") return "처방 목록 매칭";
@@ -997,12 +1000,13 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     let stopped = false;
     let emptyTries = 0;
     let totalTries = 0;
-    let lastMarkKey = "";
-    let confirmCount = 0;
     const throttleMsg = createMessageThrottle(400);
     const ensembleCfg = getEnsembleConfig();
     const ensembleBuf = new EnsembleBuffer(ensembleCfg);
+    const smartStill = new SmartStillCapture(getSmartStillConfig());
     let lastPipelineForEnsemble = null;
+    let stillPhaseDone = false;
+    let previewCountTick = 0;
 
     const fail = (msg) => {
       stopped = true;
@@ -1012,7 +1016,24 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       setDetectedMarks([]);
       setEnsembleActive(false);
       ensembleBuf.reset();
+      smartStill.reset();
     };
+
+    const runSearchOnCanvas = async (canvas) =>
+      runVisionSearch(canvas, {
+        candidateFetcher,
+        apiFetch: apiFetchPillIdentification,
+        bagHints: getSessionBagHints(),
+        candidatePool: getPrescriptionDrugs(),
+        frontBack: null,
+        debug: debugMode,
+        maxInstances: 6,
+        shareByEmbedding: true,
+        scales: [640, 960],
+        minConfidenceKeep: 0.2,
+        twoPass: true,
+        topK: 10,
+      });
 
     const tick = async () => {
       if (stopped || cancelledRef.current || processingRef.current) return;
@@ -1027,52 +1048,85 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         return;
       }
 
-      // Phase 2: on-device quality gate BEFORE any API/OCR pipeline
+      // Phase 2: live quality (realtime track)
       const quality = evaluateCaptureQuality(frame, { mode: "pill" });
       setQualityOk(quality.ok);
       if (!quality.ok) {
         const text = quality.messages[0] || "초점을 맞춰 주세요";
         const shown = throttleMsg(text);
         if (shown) setQualityHint(shown);
-        if (quality.softWarnings?.length) {
-          /* soft only */
-        }
-        timerId = setTimeout(tick, 220);
+        // still observe failed frames for score history continuity
+        smartStill.observe(frame, quality);
+        timerId = setTimeout(tick, 200);
         return;
       }
-      if (quality.softWarnings?.length) {
-        const soft = throttleMsg(quality.softWarnings[0]);
-        if (soft) setQualityHint(soft);
-      } else {
-        const okMsg = throttleMsg("좋아요. 인식 중…");
-        if (okMsg) setQualityHint(okMsg);
+
+      // Lightweight preview object count (not shown as photo)
+      let previewObjectCount;
+      previewCountTick += 1;
+      if (previewCountTick % 3 === 0) {
+        try {
+          const light = await detectInstances(frame, {
+            scales: [640],
+            marginRatio: 0.12,
+            twoPass: false,
+            minConfidenceKeep: 0.22,
+          });
+          previewObjectCount = (light.detections || []).length;
+        } catch {
+          /* ignore */
+        }
       }
 
+      const stillStatus = smartStill.observe(frame, quality, { previewObjectCount });
+      if (stillStatus.captured) {
+        const shown = throttleMsg(`좋은 순간 포착 (${stillStatus.stillCount}/${stillStatus.need})`);
+        if (shown) setQualityHint(shown);
+      } else if (!stillStatus.ready) {
+        const shown = throttleMsg(
+          `안정된 순간을 담는 중… (${stillStatus.stillCount}/${stillStatus.need})`
+        );
+        if (shown) setQualityHint(shown);
+      }
+
+      // Collect silent stills (B+C) before heavy OCR/API
+      if (!stillPhaseDone && !stillStatus.ready) {
+        timerId = setTimeout(tick, 180);
+        return;
+      }
+
+      // Timeout with zero stills → try current frame once if quality ok
+      if (!stillPhaseDone && stillStatus.ready && stillStatus.empty) {
+        smartStill.stills.push({ canvas: frame, score: quality.score, ts: Date.now(), method: "fallback-live" });
+      }
+      stillPhaseDone = true;
+
       totalTries += 1;
-      if (totalTries > 20) {
+      if (totalTries > 12) {
         fail("알약 인식에 실패했습니다. 각인(글자)이 보이게 가까이 비추거나, 표기를 직접 입력해주세요.");
         return;
       }
 
       try {
-        let pipelineResult = await runVisionSearch(frame, {
-          candidateFetcher,
-          apiFetch: apiFetchPillIdentification,
-          bagHints: getSessionBagHints(),
-          candidatePool: getPrescriptionDrugs(),
-          frontBack: null,
-          debug: debugMode,
-          maxInstances: 6,
-          shareByEmbedding: true,
-          scales: [640, 960],
-          minConfidenceKeep: 0.2,
-          twoPass: true,
-          topK: 10,
-        });
+        const rankedStills = smartStill.pickRanked();
+        const bestStill = rankedStills[0] || { canvas: frame, score: quality.score };
+        const analyzeList = rankedStills.length
+          ? rankedStills.slice(0, Math.min(3, rankedStills.length))
+          : [bestStill];
 
-        // Dual-side fusion: once front is saved, re-run with front+back crops
+        const okMsg = throttleMsg(
+          analyzeList.length > 1
+            ? `선명 컷 ${analyzeList.length}장으로 확인 중…`
+            : "선명 컷으로 인식 중…"
+        );
+        if (okMsg) setQualityHint(okMsg);
+        setEnsembleActive(analyzeList.length > 1);
+
+        let pipelineResult = await runSearchOnCanvas(bestStill.canvas);
+
+        // Dual-side fusion path (optional)
         if (dualMode && frontCrop && pipelineResult.results?.[0]?.cropCanvas) {
-          pipelineResult = await runVisionSearch(frame, {
+          pipelineResult = await runVisionSearch(bestStill.canvas, {
             candidateFetcher,
             apiFetch: apiFetchPillIdentification,
             bagHints: getSessionBagHints(),
@@ -1088,13 +1142,58 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             topK: 10,
           });
         }
+
+        // Multi-still ensemble: analyze extra silent stills and fuse votes
+        if (analyzeList.length > 1) {
+          ensembleBuf.reset();
+          ensembleBuf.start();
+          const firstBest = (pipelineResult.results || []).filter((d) => d.best);
+          if (firstBest.length) {
+            lastPipelineForEnsemble = pipelineResult;
+            ensembleBuf.addFrame(firstBest);
+          }
+          for (const still of analyzeList.slice(1)) {
+            const extra = await runSearchOnCanvas(still.canvas);
+            const hits = (extra.results || []).filter((d) => d.best);
+            if (hits.length) {
+              lastPipelineForEnsemble = extra;
+              ensembleBuf.addFrame(hits);
+            }
+          }
+          if (ensembleBuf.getFrames().length >= 1) {
+            const fused = fuseEnsembleVotes(ensembleBuf.getFrames());
+            pipelineResult = buildEnsemblePipelineResult(
+              lastPipelineForEnsemble || pipelineResult,
+              fused
+            );
+          }
+          ensembleBuf.reset();
+        }
+        setEnsembleActive(false);
+
         if (stopped || cancelledRef.current || processingRef.current) return;
 
         const dets = pipelineResult.results || [];
-        setPillBoxes(boxesFromDetections(dets, frame.width, frame.height));
+        setPillBoxes(boxesFromDetections(dets, bestStill.canvas.width, bestStill.canvas.height));
         if (debugMode) {
-          setDebugInfo(pipelineResult.debug);
+          setDebugInfo({
+            ...(pipelineResult.debug || {}),
+            smartStill: {
+              count: smartStill.stills.length,
+              scores: smartStill.stills.map((s) => Number(s.score.toFixed(3))),
+              previewCountMode: smartStill.previewObjectCountMode(),
+            },
+          });
           setMetricsSnap(formatMetricsSummary(getMetrics()));
+        }
+
+        // Cross-check preview object count vs final detections
+        const previewMode = smartStill.previewObjectCountMode();
+        const finalCount = dets.filter((d) => d.best).length || dets.length;
+        if (previewMode != null && finalCount > 0 && Math.abs(previewMode - finalCount) >= 2) {
+          setAccuracyWarning(
+            `실시간 추적(~${previewMode}개)과 최종 결과(${finalCount}개)가 달라 정확도가 낮을 수 있습니다.`
+          );
         }
 
         const withMark = dets.filter((d) => d.mark && d.mark.length >= 2);
@@ -1108,14 +1207,13 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           return conf >= 0.35;
         });
         if (dets.some((d) => d.lowAccuracy)) {
-          setAccuracyWarning("정확도가 낮을 수 있습니다. 후보를 확인해 주세요.");
+          setAccuracyWarning((prev) => prev || "정확도가 낮을 수 있습니다. 후보를 확인해 주세요.");
         }
 
         if (withMark.length) {
           setDetectedMarks([...new Set(withMark.map((d) => d.mark))]);
         }
 
-        // Dual-side: stash front crop once, then search with front+back fusion
         if (dualMode && !frontCrop && dets[0]?.cropCanvas) {
           const c = document.createElement("canvas");
           c.width = dets[0].cropCanvas.width;
@@ -1123,88 +1221,63 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           c.getContext("2d").drawImage(dets[0].cropCanvas, 0, 0);
           setFrontCrop(c);
           setCaptureSide("back");
+          stillPhaseDone = false;
+          smartStill.reset();
           timerId = setTimeout(tick, 400);
           return;
         }
 
         if (!withMark.length && !withBest.length) {
           emptyTries += 1;
-          lastMarkKey = "";
-          confirmCount = 0;
-          if (emptyTries >= 8) {
-            fail("알약 각인(표기)을 읽지 못했습니다. 글자가 선명하게 보이게 찍거나 직접 입력해주세요.");
+          // Allow one more smart-still cycle
+          if (emptyTries >= 3) {
+            fail("알약 각인(표기)을 읽지 못했습니다. 글자가 선명하게 보이게 비추거나 직접 입력해주세요.");
             return;
           }
+          stillPhaseDone = false;
+          smartStill.reset();
           timerId = setTimeout(tick, 220);
           return;
         }
 
         emptyTries = 0;
-        const key = (withBest.length ? withBest : withMark)
-          .map((d) => d.mark)
-          .filter(Boolean)
-          .sort()
-          .join("|");
-
-        if (key && key === lastMarkKey) confirmCount += 1;
-        else {
-          lastMarkKey = key;
-          confirmCount = 1;
-        }
-
-        // withBest: accept on first solid match; mark-only: need 2 frames
-        const needConfirm = withBest.length ? 1 : 2;
-        if (confirmCount < needConfirm) {
-          timerId = setTimeout(tick, 240);
-          return;
-        }
 
         if (withBest.length) {
+          // Phase 5 residual: only if still low after multi-still fuse
           const needsEnsemble = withBest.some((d) => shouldRequestEnsemble(d, ensembleCfg));
-
-          // Phase 5: low-confidence → collect more angles (conditional only)
-          if (needsEnsemble) {
+          if (needsEnsemble && analyzeList.length < 2) {
             lastPipelineForEnsemble = pipelineResult;
             const st = ensembleBuf.addFrame(withBest);
             setEnsembleActive(true);
-            const hint = st.timedOut
-              ? "시간 초과 — 지금까지 결과로 확정합니다"
-              : `다른 각도·거리에서 한 번 더 비춰 주세요 (${Math.min(st.frameCount, st.need)}/${st.need})`;
+            const hint = `다른 각도·거리에서 한 번 더 비춰 주세요 (${Math.min(st.frameCount, st.need)}/${st.need})`;
             const shown = throttleMsg(hint);
             if (shown) setQualityHint(shown);
-
             if (!st.ready) {
-              confirmCount = 0;
-              lastMarkKey = "";
+              stillPhaseDone = false;
+              smartStill.reset();
               timerId = setTimeout(tick, 320);
               return;
             }
-
             const fused = fuseEnsembleVotes(ensembleBuf.getFrames());
             const merged = buildEnsemblePipelineResult(lastPipelineForEnsemble, fused);
-            if (fused.picks[0]?.confidence < 0.45) {
-              setAccuracyWarning("여러 각도 결과를 합쳤지만 정확도가 낮을 수 있습니다.");
-            }
             ensembleBuf.reset();
             setEnsembleActive(false);
             const ok = await finalizePipelineResults(merged);
             if (!ok && !stopped && !cancelledRef.current) {
               processingRef.current = false;
-              confirmCount = 0;
-              lastMarkKey = "";
+              stillPhaseDone = false;
+              smartStill.reset();
               timerId = setTimeout(tick, 260);
             }
             return;
           }
 
-          // High confidence — skip ensemble
-          ensembleBuf.reset();
           setEnsembleActive(false);
           const ok = await finalizePipelineResults(pipelineResult);
           if (!ok && !stopped && !cancelledRef.current) {
             processingRef.current = false;
-            confirmCount = 0;
-            lastMarkKey = "";
+            stillPhaseDone = false;
+            smartStill.reset();
             timerId = setTimeout(tick, 260);
           }
           return;
@@ -1450,7 +1523,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
                   ? captureSide === "back"
                     ? "앞면을 저장했습니다. 이제 뒷면 각인을 맞춰 주세요"
                     : "앞면+뒷면 모드: 먼저 앞면 각인을 맞춰 주세요"
-                  : "흰 배경에 알약을 펼치고 카메라에 맞추세요 (QR처럼 자동 인식, 셔터 없음)"}
+                  : "흰 배경에 알약을 펼치면, 좋은 순간을 자동으로 담아 인식합니다 (셔터 없음)"}
               </p>
             )}
           </div>
@@ -2080,6 +2153,12 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
     let lastKey = "";
     let confirmCount = 0;
     const throttleMsg = createMessageThrottle(450);
+    const smartStill = new SmartStillCapture({
+      ...getSmartStillConfig(),
+      minScore: Math.min(0.38, getSmartStillConfig().minScore),
+      timeoutMs: 3500,
+    });
+    let stillReady = false;
 
     const tick = async () => {
       if (bagCancelRef.current || bagBusyRef.current) return;
@@ -2100,16 +2179,36 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
         const textMsg = quality.messages[0] || "초점을 맞춰 주세요";
         const shown = throttleMsg(textMsg);
         if (shown) setQualityHint(shown);
+        smartStill.observe(frame, quality);
         timerId = setTimeout(tick, 280);
         return;
       }
 
-      const okHint = throttleMsg("좋아요. 글자를 읽는 중…");
+      const st = smartStill.observe(frame, quality);
+      if (st.captured) {
+        const shown = throttleMsg(`선명 컷 포착 (${st.stillCount}/${st.need})`);
+        if (shown) setQualityHint(shown);
+      } else if (!st.ready) {
+        const shown = throttleMsg(`문서가 안정되면 자동으로 담아요 (${st.stillCount}/${st.need})`);
+        if (shown) setQualityHint(shown);
+      }
+
+      if (!stillReady && !st.ready) {
+        timerId = setTimeout(tick, 200);
+        return;
+      }
+      if (!stillReady && st.ready && st.empty) {
+        smartStill.stills.push({ canvas: frame, score: quality.score, ts: Date.now(), method: "fallback-live" });
+      }
+      stillReady = true;
+
+      const best = smartStill.pickBest() || { canvas: frame };
+      const okHint = throttleMsg("선명 컷으로 글자 읽는 중…");
       if (okHint) setQualityHint(okHint);
 
       bagBusyRef.current = true;
       try {
-        const docResult = await recognizeDocumentPipeline(frame, {
+        const docResult = await recognizeDocumentPipeline(best.canvas, {
           searchFn: async (name) => {
             const list = await searchPillList(name);
             return list.map((it) => ({
@@ -2125,6 +2224,8 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
         const names = (docResult.drugNames || []).filter(Boolean);
         const items = docResult.items || [];
         if (!names.length && !items.length) {
+          stillReady = false;
+          smartStill.reset();
           timerId = setTimeout(tick, 700);
           return;
         }
@@ -2141,7 +2242,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
 
         if (confirmCount >= 2) {
           bagCancelRef.current = true;
-          frame.toBlob((blob) => {
+          best.canvas.toBlob((blob) => {
             if (!blob) return;
             setSnapUrl((prev) => {
               if (prev) URL.revokeObjectURL(prev);
@@ -2149,18 +2250,21 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
             });
           }, "image/jpeg", 0.85);
           stopCamera();
-          await processCapturedCanvas(frame);
+          await processCapturedCanvas(best.canvas);
           return;
         }
 
         const wait = throttleMsg(`약 이름 확인 중… (${confirmCount}/2)`);
         if (wait) setQualityHint(wait);
+        // Re-collect stills for second confirm on a fresh good moment
+        stillReady = false;
+        smartStill.reset();
       } catch (e) {
         console.warn("[bag-live]", e);
       } finally {
         bagBusyRef.current = false;
       }
-      if (!bagCancelRef.current) timerId = setTimeout(tick, 750);
+      if (!bagCancelRef.current) timerId = setTimeout(tick, 500);
     };
 
     timerId = setTimeout(tick, 400);
