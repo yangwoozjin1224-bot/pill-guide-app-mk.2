@@ -102,7 +102,62 @@ async function searchPillList(itemName) {
   return Array.from(map.values());
 }
 
-/** Vision Search candidate pool — imprint / name guided (never color-only). */
+/** Map MFDS 낱알식별 item → candidate row */
+function mapIdItem(it) {
+  return {
+    itemSeq: String(it.ITEM_SEQ || it.itemSeq || ""),
+    name: it.ITEM_NAME || it.itemName || it.name || "",
+    itemName: it.ITEM_NAME || it.itemName || it.name || "",
+    entpName: it.ENTP_NAME || it.entpName || "",
+    imageUrl: it.ITEM_IMAGE || it.imageUrl || "",
+    tag: it.CLASS_NAME || it.tag || "의약품",
+    mark: it.PRINT_FRONT || it.mark || "",
+    PRINT_FRONT: it.PRINT_FRONT || it.mark || "",
+    PRINT_BACK: it.PRINT_BACK || "",
+    shape: it.DRUG_SHAPE || it.shape || "",
+    DRUG_SHAPE: it.DRUG_SHAPE || it.shape || "",
+    color: it.COLOR_CLASS1 || it.color || "",
+    COLOR_CLASS1: it.COLOR_CLASS1 || it.color || "",
+  };
+}
+
+/**
+ * Low-level 낱알식별 fetch for imprint pipeline.
+ * Accepts print_front / color_class1 / drug_shape / item_name query fields.
+ */
+async function apiFetchPillIdentification(query = {}) {
+  const params = {
+    type: "json",
+    numOfRows: "20",
+    pageNo: "1",
+  };
+  if (query.print_front) params.print_front = query.print_front;
+  if (query.color_class1) params.color_class1 = query.color_class1;
+  if (query.drug_shape) params.drug_shape = query.drug_shape;
+  if (query.item_name) params.item_name = query.item_name;
+  if (query.item_seq) params.item_seq = query.item_seq;
+
+  // Guard: refuse empty / color-only without shape when no imprint and no name
+  // (color+shape together is allowed for ambiguous shortlists)
+  const hasMark = Boolean(params.print_front);
+  const hasName = Boolean(params.item_name || params.item_seq);
+  const hasColorShape = Boolean(params.color_class1 && params.drug_shape);
+  const hasColorOrShape = Boolean(params.color_class1 || params.drug_shape);
+  if (!hasMark && !hasName && !hasColorShape && !(hasColorOrShape && (params.color_class1 || params.drug_shape))) {
+    // Allow single color OR shape for candidate shortlist, but only when imprint pipeline asks
+    if (!hasColorOrShape) return [];
+  }
+
+  try {
+    const json = await dataGoFetchJson("PILL_IDENTIFICATION", params);
+    return normalizeItems(json?.body?.items).map(mapIdItem).filter((x) => x.itemSeq);
+  } catch (err) {
+    console.warn("apiFetchPillIdentification failed", err);
+    return [];
+  }
+}
+
+/** Vision Search candidate pool — imprint / name guided; color+shape shortlist allowed. */
 async function fetchPillTopCandidates({ shape, color, mark, itemName, markCandidates } = {}, topK = 5) {
   const raw = [
     mark,
@@ -120,72 +175,43 @@ async function fetchPillTopCandidates({ shape, color, mark, itemName, markCandid
 
   const uniqueMarks = [...new Set(expanded)].slice(0, 6);
   const nameQ = String(itemName || "").trim();
-  if (!uniqueMarks.length && !nameQ) return [];
+  if (!uniqueMarks.length && !nameQ && !(color || shape)) return [];
 
   const map = new Map();
 
   const pull = async (query) => {
-    try {
-      const json = await dataGoFetchJson("PILL_IDENTIFICATION", {
-        type: "json",
-        numOfRows: "15",
-        pageNo: "1",
-        ...query,
-      });
-      for (const it of normalizeItems(json?.body?.items)) {
-        const id = String(it.ITEM_SEQ || "");
-        if (!id || map.has(id)) continue;
-        map.set(id, {
-          itemSeq: id,
-          name: it.ITEM_NAME || "",
-          itemName: it.ITEM_NAME || "",
-          entpName: it.ENTP_NAME || "",
-          imageUrl: it.ITEM_IMAGE || "",
-          tag: it.CLASS_NAME || "의약품",
-          mark: it.PRINT_FRONT || "",
-          PRINT_FRONT: it.PRINT_FRONT || "",
-          PRINT_BACK: it.PRINT_BACK || "",
-          shape: it.DRUG_SHAPE || "",
-          DRUG_SHAPE: it.DRUG_SHAPE || "",
-          color: it.COLOR_CLASS1 || "",
-          COLOR_CLASS1: it.COLOR_CLASS1 || "",
-        });
-      }
-    } catch (err) {
-      console.warn("Top candidates fetch failed", err);
+    const list = await apiFetchPillIdentification(query);
+    for (const it of list) {
+      if (!it.itemSeq || map.has(it.itemSeq)) continue;
+      map.set(it.itemSeq, it);
     }
   };
 
   for (const m of uniqueMarks) {
     await pull({ print_front: m });
     if (color) await pull({ print_front: m, color_class1: color });
+    if (shape) await pull({ print_front: m, drug_shape: shape });
   }
   if (nameQ) {
     await pull({ item_name: nameQ });
     try {
       const list = await searchPillList(nameQ);
       for (const it of list) {
-        const id = String(it.itemSeq || it.id || "");
+        const mapped = mapIdItem(it);
+        const id = mapped.itemSeq || String(it.itemSeq || it.id || "");
         if (!id || map.has(id)) continue;
-        map.set(id, {
-          itemSeq: id,
-          name: it.name || "",
-          itemName: it.name || "",
-          entpName: it.entpName || "",
-          imageUrl: it.imageUrl || "",
-          tag: it.tag || "의약품",
-          mark: it.mark || "",
-          PRINT_FRONT: it.mark || "",
-          PRINT_BACK: "",
-          shape: it.shape || "",
-          DRUG_SHAPE: it.shape || "",
-          color: it.color || "",
-          COLOR_CLASS1: it.color || "",
-        });
+        map.set(id, { ...mapped, itemSeq: id });
       }
     } catch {
       /* ignore */
     }
+  }
+  // Ambiguous shortlist when imprint missing
+  if (!uniqueMarks.length && !nameQ && (color || shape)) {
+    const q = {};
+    if (color) q.color_class1 = color;
+    if (shape) q.drug_shape = shape;
+    await pull(q);
   }
 
   return Array.from(map.values()).slice(0, Math.max(topK, 10));
@@ -629,6 +655,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   const [dualMode, setDualMode] = useState(false); // front+back fusion
   const [frontCrop, setFrontCrop] = useState(null);
   const [captureSide, setCaptureSide] = useState("front"); // front | back
+  const [accuracyWarning, setAccuracyWarning] = useState("");
   const cancelledRef = useRef(false);
   const processingRef = useRef(false);
   const videoRef = useRef(null);
@@ -733,12 +760,26 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     processingRef.current = true;
     setStatus("loading");
 
-    // Only accept hits with imprint-matched best (blocks color-only false positives)
-    const hits = (pipelineResult.results || []).filter(
-      (r) => r.best && (r.fusedConfidence ?? r.best.fusedScore ?? 0) >= 0.35
-    );
-    const marks = [...new Set(hits.map((r) => r.mark).filter(Boolean))];
+    // Accept DB hits; exact imprint can be slightly lower threshold than color-only
+    const hits = (pipelineResult.results || []).filter((r) => {
+      if (!r.best) return false;
+      const conf = r.fusedConfidence ?? r.best.fusedScore ?? 0;
+      const tier = r.matchTier || r.best.matchTier || "";
+      if (tier === "exact") return conf >= 0.28;
+      if (tier === "partial") return conf >= 0.35;
+      if (tier === "fallback") return conf >= 0.2; // shown with lowAccuracy warning
+      if (tier === "color_shape") return conf >= 0.4;
+      return conf >= 0.35;
+    });
+    const marks = [...new Set(hits.map((r) => r.mark || r.imprintFront).filter(Boolean))];
     setDetectedMarks(marks);
+
+    const anyLow = (pipelineResult.results || []).some((r) => r.lowAccuracy);
+    if (anyLow) {
+      setAccuracyWarning("정확도가 낮을 수 있습니다. 후보를 확인해 주세요.");
+    } else {
+      setAccuracyWarning("");
+    }
 
     if (debugMode) {
       setDebugInfo(pipelineResult.debug);
@@ -946,6 +987,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       try {
         let pipelineResult = await runVisionSearch(frame, {
           candidateFetcher,
+          apiFetch: apiFetchPillIdentification,
           bagHints: getSessionBagHints(),
           frontBack: null,
           debug: debugMode,
@@ -961,6 +1003,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         if (dualMode && frontCrop && pipelineResult.results?.[0]?.cropCanvas) {
           pipelineResult = await runVisionSearch(frame, {
             candidateFetcher,
+            apiFetch: apiFetchPillIdentification,
             bagHints: getSessionBagHints(),
             frontBack: {
               frontCanvas: frontCrop,
@@ -983,9 +1026,18 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         }
 
         const withMark = dets.filter((d) => d.mark && d.mark.length >= 2);
-        const withBest = dets.filter(
-          (d) => d.best && (d.fusedConfidence ?? d.best.fusedScore ?? 0) >= 0.35
-        );
+        const withBest = dets.filter((d) => {
+          if (!d.best) return false;
+          const conf = d.fusedConfidence ?? d.best.fusedScore ?? 0;
+          const tier = d.matchTier || d.best.matchTier || "";
+          if (tier === "exact") return conf >= 0.28;
+          if (tier === "partial") return conf >= 0.35;
+          if (tier === "color_shape" || tier === "fallback") return conf >= 0.32;
+          return conf >= 0.35;
+        });
+        if (dets.some((d) => d.lowAccuracy)) {
+          setAccuracyWarning("정확도가 낮을 수 있습니다. 후보를 확인해 주세요.");
+        }
 
         if (withMark.length) {
           setDetectedMarks([...new Set(withMark.map((d) => d.mark))]);
@@ -1090,6 +1142,11 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           <p className="text-[14px] font-bold mb-3" style={{ color: GRAY2 }}>
             {foundPills.length}개를 찾았습니다. 확인할 약을 선택하세요.
           </p>
+          {accuracyWarning ? (
+            <p className="text-[13px] font-bold mb-3 px-3 py-2 rounded-xl" style={{ color: "#92400E", backgroundColor: "#FEF3C7" }}>
+              {accuracyWarning}
+            </p>
+          ) : null}
           <div className="flex flex-col gap-2 overflow-y-auto" style={{ maxHeight: "560px" }}>
             {foundPills.map((p) => (
               <Card key={p.id} className="w-full flex items-center gap-3 px-3 py-3 text-left" onClick={() => openPill(p)}>

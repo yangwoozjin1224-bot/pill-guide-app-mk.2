@@ -1,5 +1,5 @@
 /**
- * Vision recognition modules — Detection, OCR, and Vision Search Engine.
+ * Vision recognition modules — imprint-first DB pipeline + detectors/features/match.
  */
 export * from "./preprocess.js";
 export * from "./detect.js";
@@ -11,3 +11,7 @@ export * from "./metrics.js";
 export * from "./augmentation.js";
 export * from "./pipeline.js";
 export * from "./search/mod.js";
+export * from "./detectors/index.js";
+export * from "./features/index.js";
+export * from "./match/index.js";
+export * from "./imprintPipeline.js";

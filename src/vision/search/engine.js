@@ -1,15 +1,11 @@
 /**
- * Pill Vision Search Engine (Naver-Lens-style, pill-specialized).
+ * Pill Vision Search Engine.
  *
- * Camera frame
- *   → Image Enhancement
- *   → Instance Segmentation (mask)
- *   → Crop (+10–20% margin)
- *   → Vision Embedding
- *   → Vector Search (Top-10)
- *   → OCR (imprint)
- *   → Feature Fusion + Re-ranking
- *   → Final Prediction (refine if low confidence)
+ * Default path (imprintPipeline !== false):
+ *   segment → extract (OCR+CV+observation LLM) → imprint-first DB match → fallback LLM
+ *
+ * Legacy path (imprintPipeline: false):
+ *   enhance → mask segment → embed → vector + OCR fusion re-rank
  */
 
 import { preprocessForDetection } from "../preprocess.js";
@@ -29,16 +25,22 @@ import { crossCheckWithBag } from "./bag.js";
 import { fuseFrontBack } from "./dual.js";
 import { logRetrievalRun } from "./evaluate.js";
 import { logDetectionRun, logEndToEnd } from "../metrics.js";
+import { runImprintPipeline, getImprintPipelineConfig } from "../imprintPipeline.js";
+import { setCustomDetector } from "../detectors/index.js";
 
 let externalDetector = null;
 
 export function setExternalDetector(fn) {
   externalDetector = typeof fn === "function" ? fn : null;
+  // Keep detectors registry in sync for imprint pipeline
+  setCustomDetector(fn);
 }
 
 export function getVisionSearchConfig() {
   return {
-    pipeline: [
+    pipeline: getImprintPipelineConfig().stages,
+    defaultPath: "imprint-db",
+    legacyPath: [
       "enhance",
       "instance-segmentation",
       "crop",
@@ -50,7 +52,7 @@ export function getVisionSearchConfig() {
       "final-prediction",
     ],
     rerankWeights: { embedding: 0.4, ocr: 0.3, shape: 0.15, color: 0.1, size: 0.05 },
-    cropMargin: 0.15,
+    cropMargin: 0.18,
     retrieveTopK: 10,
     embedding: "handcrafted-dense-128 (CLIP/ViT via setEmbeddingProvider)",
   };
@@ -157,10 +159,12 @@ async function refineLowConfidence(cropCanvas, query, ctx) {
 
 /**
  * Main entry: Vision Search on a frame/canvas.
+ * Defaults to imprint-first DB pipeline; set imprintPipeline:false for legacy fusion path.
  */
 export async function runVisionSearch(sourceCanvas, options = {}) {
   const {
     candidateFetcher,
+    apiFetch,
     bagHints = [],
     bagStructured = null,
     frontBack = null,
@@ -168,9 +172,34 @@ export async function runVisionSearch(sourceCanvas, options = {}) {
     maxInstances = 8,
     topK = 10,
     shareByEmbedding = true,
+    imprintPipeline = true,
+    useLlm,
+    useFallbackLlm,
+    llmFetcher,
   } = options;
 
   const hints = bagHints.length ? bagHints : bagStructured?.drugNames || [];
+
+  if (imprintPipeline !== false && !frontBack) {
+    const out = await runImprintPipeline(sourceCanvas, {
+      ...options,
+      candidateFetcher,
+      apiFetch,
+      bagHints: hints,
+      maxInstances,
+      topK,
+      useLlm,
+      useFallbackLlm,
+      llmFetcher,
+      debug,
+    });
+    logRetrievalRun({
+      topK,
+      resultCount: (out.results || []).filter((r) => r.best).length,
+      finalAccepted: (out.results || []).some((r) => r.best && (r.fusedConfidence || 0) >= 0.3),
+    });
+    return out;
+  }
 
   const segmented = await segment(sourceCanvas, options);
   const detections = (segmented.detections || []).slice(0, maxInstances);
