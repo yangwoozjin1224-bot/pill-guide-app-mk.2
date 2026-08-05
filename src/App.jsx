@@ -1,5 +1,18 @@
 import { useState, useEffect, useRef } from "react";
-import { Home, Search, Camera, Clock, ChevronLeft, ChevronRight, Volume2, Check } from "lucide-react";
+import {
+  Home,
+  Search,
+  Camera,
+  Clock,
+  ChevronLeft,
+  ChevronRight,
+  Volume2,
+  Check,
+  Plus,
+  MessageCircle,
+  MoreHorizontal,
+  Scan,
+} from "lucide-react";
 import {
   runVisionSearch,
   recognizeDocumentPipeline,
@@ -38,7 +51,7 @@ function matchSourceLabel(source) {
 // ---- Design tokens (reference images) ----
 const RED = "#E53E3E";
 const RED_LIGHT = "#FFF5F5";
-const BG = "#F5F5F7";
+const BG = "#FFFFFF";
 const CARD = "#FFFFFF";
 const BLACK = "#1A1A1A";
 const GRAY = "#9CA3AF";
@@ -47,6 +60,12 @@ const BORDER = "#E8E8E8";
 const GREEN = "#059669";
 const GREEN_BG = "#ECFDF5";
 const BLUE_CARD = "#EFF6FF";
+const SCAN_CARD_BG = "#E1DFFF";
+const SCAN_BUTTON_BG = "#7A5AF8";
+const SCAN_INACTIVE = "#C4B5FD";
+const MANAGE_CARD_BG = "#D5F2DE";
+const MANAGE_BUTTON_BG = "#34C759";
+const SEARCH_BG = "#F6F6F6";
 
 const API_KEY =
   (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_API_KEY) ||
@@ -423,34 +442,61 @@ function Card({ children, className = "", style = {}, onClick }) {
 }
 
 function BottomNav({ screen, setScreen }) {
-  const items = [
-    { key: "home", icon: Home, label: "홈" },
-    { key: "search", icon: Search, label: "약 찾기" },
-    { key: "scan", icon: Camera, label: "촬영" },
-    { key: "management", icon: Clock, label: "복용관리" },
+  // 스펙: 홈 / + / 중앙 스캔 / 시계 / 말풍선
+  // + 는 기존 약 찾기(search) 네비게이션 로직 유지
+  const leftItems = [
+    { key: "home", icon: Home },
+    { key: "search", icon: Plus },
   ];
+  const rightItems = [
+    { key: "management", icon: Clock },
+    { key: "chat", icon: MessageCircle, noop: true },
+  ];
+  const muted = "#A8B3C4";
+  const scanActive = screen === "scan";
+
   return (
     <div
-      className="absolute bottom-0 left-0 right-0 bg-white border-t flex items-center justify-around py-2"
+      className="absolute bottom-0 left-0 right-0 bg-white border-t flex items-end justify-around px-2 pt-2 pb-3 z-20"
       style={{ borderColor: BORDER }}
     >
-      {items.map((it) => {
+      {leftItems.map((it) => {
         const Icon = it.icon;
         const active = screen === it.key;
         return (
           <button
             key={it.key}
             onClick={() => setScreen(it.key)}
-            className="flex flex-1 flex-col items-center justify-center gap-1 min-h-[56px] py-1"
+            className="flex items-center justify-center w-12 h-12"
+            aria-label={it.key}
           >
-            <Icon
-              size={24}
-              color={active ? BLACK : GRAY}
-              strokeWidth={active ? 2.6 : 1.8}
-            />
-            <span className="text-[11px] font-medium" style={{ color: GRAY }}>
-              {it.label}
-            </span>
+            <Icon size={26} color={active ? "#4B5563" : muted} strokeWidth={active ? 2.4 : 2} />
+          </button>
+        );
+      })}
+
+      <button
+        onClick={() => setScreen("scan")}
+        className="flex items-center justify-center w-[64px] h-[64px] rounded-full -mt-6 shadow-lg"
+        style={{ backgroundColor: scanActive ? SCAN_BUTTON_BG : SCAN_INACTIVE }}
+        aria-label="촬영"
+      >
+        <Scan size={28} color="#FFFFFF" strokeWidth={2.4} />
+      </button>
+
+      {rightItems.map((it) => {
+        const Icon = it.icon;
+        const active = screen === it.key;
+        return (
+          <button
+            key={it.key}
+            onClick={() => {
+              if (!it.noop) setScreen(it.key);
+            }}
+            className="flex items-center justify-center w-12 h-12"
+            aria-label={it.key}
+          >
+            <Icon size={26} color={active ? "#4B5563" : muted} strokeWidth={active ? 2.4 : 2} />
           </button>
         );
       })}
@@ -458,104 +504,183 @@ function BottomNav({ screen, setScreen }) {
   );
 }
 
+function CapsuleIllustration() {
+  return (
+    <svg width="88" height="88" viewBox="0 0 88 88" fill="none" aria-hidden="true">
+      <ellipse cx="44" cy="48" rx="34" ry="12" fill="#C4B5FD" opacity="0.35" />
+      <g transform="rotate(-35 44 40)">
+        <rect x="14" y="28" width="60" height="26" rx="13" fill="#A78BFA" />
+        <rect x="14" y="28" width="30" height="26" rx="13" fill="#67E8F9" />
+        <rect x="40" y="28" width="8" height="26" fill="#F8FAFC" opacity="0.9" />
+      </g>
+      <circle cx="62" cy="22" r="4" fill="#93C5FD" />
+      <circle cx="70" cy="30" r="3" fill="#F8FAFC" stroke="#93C5FD" />
+      <circle cx="58" cy="32" r="2.5" fill="#60A5FA" />
+    </svg>
+  );
+}
+
+function ClipboardIllustration() {
+  return (
+    <svg width="72" height="72" viewBox="0 0 72 72" fill="none" aria-hidden="true">
+      <rect x="18" y="14" width="36" height="46" rx="6" stroke="#34C759" strokeWidth="2.5" fill="#FFFFFF" />
+      <rect x="28" y="10" width="16" height="8" rx="3" stroke="#EC4899" strokeWidth="2" fill="#FFFFFF" />
+      <path d="M28 30h16M28 38h16M28 46h10" stroke="#60A5FA" strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M48 48l4 4 8-10" stroke="#34C759" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="52" cy="22" r="3" stroke="#EC4899" strokeWidth="1.8" fill="none" />
+    </svg>
+  );
+}
+
 // ---- Screens ----
 
 function HomeScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   return (
-    <div className="flex flex-col h-full overflow-y-auto pb-24" style={{ backgroundColor: BG }}>
-      {/* Header */}
-      <div className="px-5 pt-6 pb-4 flex items-center justify-between bg-white">
-        <p className="text-[22px] font-extrabold" style={{ color: BLACK }}>양우진 님</p>
+    <div className="flex flex-col h-full overflow-y-auto pb-28" style={{ backgroundColor: BG }}>
+      {/* 1. 상단: 로고 + 인사 / 메뉴(기존 피드백 화면 진입 유지) */}
+      <div className="px-5 pt-6 pb-3 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div
+            className="w-11 h-11 rounded-full flex items-center justify-center flex-shrink-0 text-white font-extrabold text-[15px]"
+            style={{ backgroundColor: RED }}
+            aria-hidden="true"
+          >
+            약
+          </div>
+          <p className="text-[22px] font-extrabold" style={{ color: BLACK }}>양우진 님</p>
+        </div>
         <button
           type="button"
           onClick={() => setScreen("feedbackStats")}
-          className="text-[12px] font-bold px-2 py-1 rounded-lg"
-          style={{ color: GRAY2, backgroundColor: "#F3F4F6" }}
+          className="w-10 h-10 rounded-full flex items-center justify-center"
+          style={{ backgroundColor: "#F3F4F6" }}
+          aria-label={`피드백 ${getFeedbackCount()}`}
         >
-          피드백 {getFeedbackCount()}
+          <MoreHorizontal size={22} color="#6B7280" />
         </button>
       </div>
 
-      <div className="px-4 pt-4">
-        {/* Search bar */}
-        <Card className="w-full flex items-center px-4 py-3 gap-3" onClick={() => setScreen("search")}>
-          <span className="text-[16px]" style={{ color: GRAY }}>검색하기</span>
-          <Search size={20} color={GRAY} className="ml-auto" />
-        </Card>
-      </div>
-
-      {/* Scan card */}
-      <div className="px-4 pt-4">
-        <Card
-          className="w-full p-5 text-left"
-          style={{ background: "linear-gradient(135deg, #E8F5E9 0%, #E3F2FD 100%)" }}
-          onClick={() => setScreen("scan")}
+      {/* 2. 검색창 — 기존 약 찾기 이동 로직 유지 */}
+      <div className="px-5 pt-1">
+        <button
+          type="button"
+          onClick={() => setScreen("search")}
+          className="w-full min-h-[52px] rounded-2xl flex items-center px-4 gap-3 text-left"
+          style={{ backgroundColor: SEARCH_BG }}
         >
-          <p className="text-[22px] font-extrabold leading-snug" style={{ color: BLACK }}>알약 촬영하기</p>
-          <p className="text-[14px] mt-1 leading-relaxed" style={{ color: GRAY2 }}>
-            알약을 카메라로 촬영하면 종류와 복용 방법을 자동으로 찾아드려요.
-          </p>
-          <div
-            className="mt-4 w-[160px] min-h-[44px] rounded-full flex items-center justify-center font-bold text-[16px]"
-            style={{ backgroundColor: RED, color: "#fff" }}
-          >
-            촬영하러 가기
-          </div>
-        </Card>
+          <span className="flex-1 text-[16px]" style={{ color: GRAY }}>검색하기</span>
+          <Search size={22} color={GRAY} />
+        </button>
       </div>
 
-      {/* Management card */}
-      <div className="px-4 pt-3">
-        <Card
-          className="w-full p-5 text-left"
-          style={{ background: "linear-gradient(135deg, #F3E8FF 0%, #EDE9FE 100%)" }}
-          onClick={() => setScreen("management")}
+      {/* 3. 카드 A — 알약 촬영하기 */}
+      <div className="px-5 pt-5">
+        <div
+          className="w-full rounded-[28px] p-5 relative overflow-hidden text-left"
+          style={{ backgroundColor: SCAN_CARD_BG }}
         >
-          <p className="text-[20px] font-extrabold" style={{ color: BLACK }}>복용 관리</p>
-          <p className="text-[14px] mt-1" style={{ color: GRAY2 }}>
-            오늘 먹을 약, 잊지 말고 챙기세요
-          </p>
-          <div
-            className="mt-4 w-[160px] min-h-[44px] rounded-full flex items-center justify-center font-bold text-[16px]"
-            style={{ backgroundColor: RED, color: "#fff" }}
-          >
-            복용 기록하기
+          <div className="pr-[96px]">
+            <p className="text-[22px] font-extrabold leading-tight" style={{ color: BLACK }}>알약 촬영하기</p>
+            <p className="text-[13px] mt-2 leading-relaxed" style={{ color: BLACK }}>
+              알약을 카메라로 촬영하면 종류와 복용 방법을 자동으로 찾아드려요.
+            </p>
+            <button
+              type="button"
+              onClick={() => setScreen("scan")}
+              className="mt-4 min-h-[44px] px-5 rounded-xl font-bold text-[15px] text-white inline-flex items-center justify-center active:scale-[0.98] transition-transform"
+              style={{ backgroundColor: SCAN_BUTTON_BG }}
+            >
+              촬영하러 가기
+            </button>
           </div>
-        </Card>
-      </div>
-
-      {/* 자주 먹는 약 */}
-      <div className="px-4 pt-5">
-        <div className="flex items-center justify-between mb-3">
-          <p className="text-[18px] font-extrabold" style={{ color: BLACK }}>자주 먹는 약</p>
-          <span className="text-[13px] font-semibold" style={{ color: RED }}>전체 확인</span>
+          <div className="absolute right-2 bottom-3 pointer-events-none">
+            <CapsuleIllustration />
+          </div>
         </div>
-        <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-hide">
+      </div>
+
+      {/* 4. 카드 B — 복용 관리 */}
+      <div className="px-5 pt-4">
+        <div
+          className="w-full rounded-[28px] p-5 relative overflow-hidden text-left"
+          style={{ backgroundColor: MANAGE_CARD_BG }}
+        >
+          <div className="pr-[88px]">
+            <p className="text-[22px] font-extrabold leading-tight" style={{ color: BLACK }}>복용 관리</p>
+            <p className="text-[13px] mt-2 leading-relaxed" style={{ color: BLACK }}>
+              오늘 먹을 약, 잊지 말고 챙기세요
+            </p>
+            <button
+              type="button"
+              onClick={() => setScreen("management")}
+              className="mt-4 min-h-[44px] px-5 rounded-xl font-bold text-[15px] text-white inline-flex items-center justify-center active:scale-[0.98] transition-transform"
+              style={{ backgroundColor: MANAGE_BUTTON_BG }}
+            >
+              복용 기록하기
+            </button>
+          </div>
+          <div className="absolute right-3 bottom-4 pointer-events-none">
+            <ClipboardIllustration />
+          </div>
+        </div>
+      </div>
+
+      {/* 5~6. 자주 먹는 약 — schedule 기반 데이터/상세 이동 로직 유지 */}
+      <div className="pt-7 pb-4">
+        <div className="px-5 flex items-center justify-between mb-3">
+          <p className="text-[18px] font-extrabold" style={{ color: BLACK }}>자주 먹는 약</p>
+          <button
+            type="button"
+            onClick={() => setScreen("management")}
+            className="text-[14px] font-semibold"
+            style={{ color: SCAN_BUTTON_BG }}
+          >
+            전체 확인
+          </button>
+        </div>
+        <div className="flex gap-3 overflow-x-auto px-5 pb-1 scrollbar-hide">
           {schedule.length === 0 && (
-            <Card className="min-w-[140px] p-4 flex flex-col items-center justify-center gap-2">
+            <div
+              className="min-w-[140px] p-4 rounded-2xl border flex flex-col items-center justify-center gap-2"
+              style={{ borderColor: BORDER, backgroundColor: CARD }}
+            >
               <p className="text-[13px] text-center" style={{ color: GRAY }}>등록된 약이 없어요</p>
-            </Card>
+            </div>
           )}
           {schedule.map((p) => (
-            <Card
+            <button
               key={p.id}
-              className="min-w-[140px] max-w-[160px] p-3 flex flex-col items-center gap-2 flex-shrink-0"
+              type="button"
               onClick={() => {
                 setDetailSource("search");
                 setActivePill(p);
                 setScreen("detail");
               }}
+              className="w-[132px] flex-shrink-0 rounded-2xl border bg-white text-left overflow-hidden"
+              style={{ borderColor: BORDER }}
             >
-              <div className="w-[80px] h-[80px] rounded-xl overflow-hidden flex items-center justify-center" style={{ backgroundColor: "#F9FAFB" }}>
+              <div
+                className="w-full h-[96px] flex items-center justify-center overflow-hidden"
+                style={{ backgroundColor: "#F9FAFB" }}
+              >
                 {p.imageUrl ? (
-                  <img src={p.imageUrl} alt={p.name} className="w-full h-full object-contain" />
+                  <img src={p.imageUrl} alt={p.name} className="w-full h-full object-contain p-2" />
                 ) : (
-                  <span className="text-[14px] font-bold" style={{ color: GRAY }}>이미지 없음</span>
+                  <span className="text-[12px] font-bold" style={{ color: GRAY }}>이미지 없음</span>
                 )}
               </div>
-              <p className="text-[14px] font-bold text-center leading-tight" style={{ color: BLACK }}>{p.name.length > 12 ? p.name.slice(0, 12) + "…" : p.name}</p>
-              <p className="text-[12px]" style={{ color: GRAY }}>{p.tag}</p>
-            </Card>
+              <div className="px-3 py-2.5">
+                <p className="text-[14px] font-extrabold leading-tight truncate" style={{ color: BLACK }}>
+                  {p.name}
+                </p>
+                <p className="text-[11px] mt-0.5" style={{ color: GRAY }}>{p.tag}</p>
+                {p.timing ? (
+                  <p className="text-[12px] font-bold mt-1.5 leading-snug line-clamp-2" style={{ color: BLACK }}>
+                    {String(p.timing).length > 24 ? `${String(p.timing).slice(0, 24)}…` : p.timing}
+                  </p>
+                ) : null}
+              </div>
+            </button>
           ))}
         </div>
       </div>
