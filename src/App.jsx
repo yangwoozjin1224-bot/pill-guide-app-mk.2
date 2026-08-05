@@ -17,6 +17,11 @@ import {
   getFeedbackCount,
   clearFeedback,
   isFeedbackImageAllowed,
+  shouldRequestEnsemble,
+  getEnsembleConfig,
+  EnsembleBuffer,
+  fuseEnsembleVotes,
+  buildEnsemblePipelineResult,
 } from "./vision/pipeline.js";
 import { formatMetricsSummary, getMetrics } from "./vision/metrics.js";
 
@@ -683,6 +688,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   const [accuracyWarning, setAccuracyWarning] = useState("");
   const [qualityHint, setQualityHint] = useState("");
   const [qualityOk, setQualityOk] = useState(true);
+  const [ensembleActive, setEnsembleActive] = useState(false);
   const cancelledRef = useRef(false);
   const processingRef = useRef(false);
   const videoRef = useRef(null);
@@ -985,6 +991,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     setDetectedMarks([]);
     setPillBoxes([]);
     setErrorMsg("");
+    setEnsembleActive(false);
 
     let timerId = null;
     let stopped = false;
@@ -993,6 +1000,9 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     let lastMarkKey = "";
     let confirmCount = 0;
     const throttleMsg = createMessageThrottle(400);
+    const ensembleCfg = getEnsembleConfig();
+    const ensembleBuf = new EnsembleBuffer(ensembleCfg);
+    let lastPipelineForEnsemble = null;
 
     const fail = (msg) => {
       stopped = true;
@@ -1000,6 +1010,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       setStatus("error");
       setErrorMsg(msg);
       setDetectedMarks([]);
+      setEnsembleActive(false);
+      ensembleBuf.reset();
     };
 
     const tick = async () => {
@@ -1148,6 +1160,46 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         }
 
         if (withBest.length) {
+          const needsEnsemble = withBest.some((d) => shouldRequestEnsemble(d, ensembleCfg));
+
+          // Phase 5: low-confidence → collect more angles (conditional only)
+          if (needsEnsemble) {
+            lastPipelineForEnsemble = pipelineResult;
+            const st = ensembleBuf.addFrame(withBest);
+            setEnsembleActive(true);
+            const hint = st.timedOut
+              ? "시간 초과 — 지금까지 결과로 확정합니다"
+              : `다른 각도·거리에서 한 번 더 비춰 주세요 (${Math.min(st.frameCount, st.need)}/${st.need})`;
+            const shown = throttleMsg(hint);
+            if (shown) setQualityHint(shown);
+
+            if (!st.ready) {
+              confirmCount = 0;
+              lastMarkKey = "";
+              timerId = setTimeout(tick, 320);
+              return;
+            }
+
+            const fused = fuseEnsembleVotes(ensembleBuf.getFrames());
+            const merged = buildEnsemblePipelineResult(lastPipelineForEnsemble, fused);
+            if (fused.picks[0]?.confidence < 0.45) {
+              setAccuracyWarning("여러 각도 결과를 합쳤지만 정확도가 낮을 수 있습니다.");
+            }
+            ensembleBuf.reset();
+            setEnsembleActive(false);
+            const ok = await finalizePipelineResults(merged);
+            if (!ok && !stopped && !cancelledRef.current) {
+              processingRef.current = false;
+              confirmCount = 0;
+              lastMarkKey = "";
+              timerId = setTimeout(tick, 260);
+            }
+            return;
+          }
+
+          // High confidence — skip ensemble
+          ensembleBuf.reset();
+          setEnsembleActive(false);
           const ok = await finalizePipelineResults(pipelineResult);
           if (!ok && !stopped && !cancelledRef.current) {
             processingRef.current = false;
@@ -1305,9 +1357,11 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
               border: `3px solid ${
                 status === "loading"
                   ? "#34D399"
-                  : qualityOk
-                    ? "rgba(52, 211, 153, 0.95)"
-                    : "rgba(251, 191, 36, 0.95)"
+                  : ensembleActive
+                    ? "rgba(99, 102, 241, 0.95)"
+                    : qualityOk
+                      ? "rgba(52, 211, 153, 0.95)"
+                      : "rgba(251, 191, 36, 0.95)"
               }`,
               boxShadow: "0 0 0 9999px rgba(0,0,0,0.4)",
             }}

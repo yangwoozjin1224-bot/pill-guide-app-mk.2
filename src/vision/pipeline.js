@@ -59,6 +59,14 @@ export {
 } from "./feedback/index.js";
 
 export {
+  getEnsembleConfig,
+  shouldRequestEnsemble,
+  EnsembleBuffer,
+  fuseEnsembleVotes,
+  buildEnsemblePipelineResult,
+} from "./ensemble/index.js";
+
+export {
   recognizeMedicineBag as recognizeDocumentPipeline,
   setSessionBagContext,
   getSessionBagHints,
