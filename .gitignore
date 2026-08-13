@@ -3,5 +3,10 @@ dist
 .env
 .DS_Store
 test-results.json
+scan-test-results.json
 playwright-report
 test-results
+test-fixtures/scan/*.png
+test-fixtures/scan/*.jpg
+test-fixtures/scan/*.jpeg
+test-fixtures/scan/*.webp

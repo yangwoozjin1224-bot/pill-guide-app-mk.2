@@ -994,6 +994,10 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const canvasRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const forceGalleryRef = useRef(false);
+  const galleryCanvasRef = useRef(null);
+  const [resumeKey, setResumeKey] = useState(0);
 
   const stopCamera = () => {
     if (!streamRef.current) return;
@@ -1002,6 +1006,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   };
 
   const openCamera = async () => {
+    forceGalleryRef.current = false;
+    galleryCanvasRef.current = null;
     if (!navigator?.mediaDevices?.getUserMedia) {
       setCameraError("카메라를 지원하지 않는 브라우저입니다.");
       return false;
@@ -1033,6 +1039,67 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       setCameraError("카메라 권한을 허용해주세요.");
       return false;
     }
+  };
+
+  // 앨범/테스트용: 이미지를 카메라 스트림처럼 주입 (기존 인식 루프 그대로 사용)
+  const injectImageAsCamera = async (fileOrBlob) => {
+    try {
+      const bmp = await createImageBitmap(fileOrBlob);
+      const source = document.createElement("canvas");
+      source.width = 960;
+      source.height = 960;
+      const sctx = source.getContext("2d");
+      if (!sctx) throw new Error("canvas 생성 실패");
+      sctx.fillStyle = "#F3F4F6";
+      sctx.fillRect(0, 0, 960, 960);
+      const scale = Math.max(960 / bmp.width, 960 / bmp.height);
+      const w = bmp.width * scale;
+      const h = bmp.height * scale;
+      sctx.drawImage(bmp, (960 - w) / 2, (960 - h) / 2, w, h);
+      if (typeof bmp.close === "function") bmp.close();
+
+      stopCamera();
+      setCameraError("");
+      galleryCanvasRef.current = source;
+      forceGalleryRef.current = true;
+
+      const stream = source.captureStream(8);
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        try {
+          await videoRef.current.play();
+        } catch {}
+        await new Promise((resolve) => {
+          if (videoRef.current?.videoWidth) resolve();
+          else {
+            videoRef.current.onloadedmetadata = () => resolve();
+            setTimeout(resolve, 400);
+          }
+        });
+      }
+      processingRef.current = false;
+      setFoundPills([]);
+      setDetectedMarks([]);
+      setPillBoxes([]);
+      setErrorMsg("");
+      setQualityHint("앨범 사진으로 인식 중…");
+      setQualityOk(true);
+      setStatus("scanning");
+      setResumeKey((k) => k + 1);
+      return true;
+    } catch (err) {
+      console.error("이미지 주입 실패:", err);
+      setCameraError("이미지를 불러오지 못했어요. 다른 사진을 선택해주세요.");
+      return false;
+    }
+  };
+
+  const onGalleryPick = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    await injectImageAsCamera(file);
   };
 
   useEffect(() => {
@@ -1264,8 +1331,6 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     setScreen("detail");
   };
 
-  const [resumeKey, setResumeKey] = useState(0);
-
   const resumeScanning = async () => {
     setFoundPills([]);
     setDetectedMarks([]);
@@ -1334,6 +1399,52 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
 
     const tick = async () => {
       if (stopped || cancelledRef.current || processingRef.current) return;
+
+      // 앨범 사진: 품질게이트/스마트스틸을 건너뛰고 즉시 1회 인식
+      if (forceGalleryRef.current && galleryCanvasRef.current) {
+        const galleryFrame = galleryCanvasRef.current;
+        forceGalleryRef.current = false;
+        processingRef.current = true;
+        setStatus("loading");
+        setQualityOk(true);
+        setQualityHint("앨범 사진으로 인식 중…");
+        try {
+          const pipelineResult = await runSearchOnCanvas(galleryFrame);
+          if (stopped || cancelledRef.current) return;
+          const dets = pipelineResult.results || [];
+          setPillBoxes(boxesFromDetections(dets, galleryFrame.width, galleryFrame.height));
+          const withMark = dets.filter((d) => d.mark && d.mark.length >= 2);
+          const withBest = dets.filter((d) => {
+            if (!d.best) return false;
+            const conf = d.fusedConfidence ?? d.best.fusedScore ?? 0;
+            const tier = d.matchTier || d.best.matchTier || "";
+            if (tier === "exact") return conf >= 0.28;
+            if (tier === "partial") return conf >= 0.35;
+            if (tier === "color_shape" || tier === "fallback") return conf >= 0.32;
+            return conf >= 0.35;
+          });
+          if (withMark.length) {
+            setDetectedMarks([...new Set(withMark.map((d) => d.mark))]);
+          }
+          if (withBest.length) {
+            const ok = await finalizePipelineResults(pipelineResult);
+            if (!ok) {
+              fail("사진에서 약을 특정하지 못했습니다. 다른 사진으로 시도하거나 표기를 직접 입력해주세요.");
+            }
+            return;
+          }
+          if (withMark.length) {
+            await lookupMarks(withMark.map((d) => ({ mark: d.mark, color: d.color || "" })));
+            return;
+          }
+          fail("사진에서 알약/각인을 찾지 못했습니다. 알약이 크게·선명하게 나온 사진을 선택해주세요.");
+        } catch (err) {
+          console.warn("gallery pipeline error", err);
+          fail(err.message || "앨범 사진 인식에 실패했습니다.");
+        }
+        return;
+      }
+
       if (!videoRef.current?.videoWidth) {
         timerId = setTimeout(tick, 150);
         return;
@@ -1681,6 +1792,23 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           <ChevronLeft size={28} color="#fff" />
         </button>
         <p className="text-[18px] font-bold text-white flex-1">알약 촬영</p>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          data-testid="scan-gallery-input"
+          onChange={onGalleryPick}
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          className="min-h-[32px] px-3 rounded-full text-[12px] font-bold mr-2"
+          style={{ backgroundColor: "rgba(255,255,255,0.2)", color: "#fff" }}
+          aria-label="앨범에서 선택"
+        >
+          앨범
+        </button>
         <button
           onClick={() => {
             setDualMode((v) => !v);
@@ -1718,6 +1846,15 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
               style={{ backgroundColor: RED, color: "#fff" }}
             >
               다시 시도
+            </button>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="min-h-[44px] px-5 rounded-full font-bold text-[15px]"
+              style={{ backgroundColor: BLACK, color: "#fff" }}
+              aria-label="앨범에서 선택"
+            >
+              앨범에서 사진 선택
             </button>
           </div>
         ) : (
