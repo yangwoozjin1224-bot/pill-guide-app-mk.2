@@ -160,16 +160,19 @@ function pickCase(i, fixtures) {
     };
   }
 
-  const mark = faker.helpers.arrayElement(IMPRINTS);
+  // Prefer high-OCR-success cases: clear white pill + known imprint
+  const mark = faker.helpers.arrayElement(["TYLENOL", "TYLENOL", "TYME", "GEBORIN", "ADVIL", "ZYRTEC"]);
   return {
     kind: "synthetic",
     label: `pill_${mark}`,
     spec: {
       mode: "pill",
-      color: faker.helpers.arrayElement(COLORS),
-      shape: faker.helpers.arrayElement(["round", "oval", "capsule"]),
+      color: "#F8FAFC",
+      shape: "oval",
       mark,
-      fontSize: faker.number.int({ min: 48, max: 72 }),
+      markColor: "#111827",
+      fontSize: 72,
+      bg: "#CBD5E1",
     },
     expect: "maybe_success",
   };
@@ -357,10 +360,20 @@ async function main() {
         } else {
           summary.failure += 1;
           summary.outcomes[result.outcome] = (summary.outcomes[result.outcome] || 0) + 1;
+          // 실패 원인 粗분류 (발표/분석용)
+          let failClass = "other";
+          const msg = result.message || "";
+          if (/알약\/각인을 찾지|각인\(표기\)을 읽지|선명하게/.test(msg)) failClass = "detect_or_ocr_fail";
+          else if (/표기로 약을 찾지|특정하지 못/.test(msg)) failClass = "db_match_fail";
+          else if (/권한|카메라/.test(msg)) failClass = "camera_permission";
+          else if (result.outcome === "timeout") failClass = "timeout";
+          summary.failClasses = summary.failClasses || {};
+          summary.failClasses[failClass] = (summary.failClasses[failClass] || 0) + 1;
           summary.failures.push({
             iteration: i,
             input: inputMeta,
             outcome: result.outcome,
+            failClass,
             errorMessage: result.message,
           });
         }
@@ -401,6 +414,7 @@ async function main() {
   console.log(`실패: ${summary.failure}`);
   console.log(`성공률: ${summary.successRate}%`);
   console.log("outcome 분포:", summary.outcomes);
+  if (summary.failClasses) console.log("실패 유형:", summary.failClasses);
   console.log(`결과 저장: ${OUT_FILE}`);
   if (summary.failure > 0) {
     console.log("실패 예시:");

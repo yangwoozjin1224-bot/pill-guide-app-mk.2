@@ -1,9 +1,35 @@
 /**
  * Imprint-first MFDS 낱알식별 DB matching with local cache.
+ *
+ * NOTE: data.go.kr Service03 currently ignores print_front / color / shape
+ * filters for many keys (returns the full catalog page). Working filter is
+ * primarily item_name / item_seq. So we map OCR imprints → Korean name
+ * candidates, query by item_name, then rank by PRINT_FRONT client-side.
  */
 
 import { cacheKey, getCached, setCached } from "./cache.js";
 import { rankCandidates, cleanMark } from "./confidence.js";
+
+/** Common OTC imprint → Korean product name hints for item_name queries */
+const IMPRINT_NAME_HINTS = {
+  TYLENOL: ["타이레놀"],
+  TYLENOLER: ["타이레놀"],
+  TYME: ["우먼스타이레놀", "타이레놀"],
+  GEBORIN: ["게보린"],
+  ADVIL: ["애드빌"],
+  ZYRTEC: ["지르텍"],
+  ASPIRIN: ["아스피린"],
+  FESTAL: ["훼스탈"],
+  BEAZYME: ["베아제"],
+  BEASYME: ["베아제"],
+  CLARITIN: ["클라리틴"],
+  ALLEGRA: ["알레그라"],
+  SMECTA: ["스멕타"],
+  TACEN: ["탁센"],
+  NAXEN: ["낙센"],
+  BRUFEN: ["부루펜"],
+  PENZAL: ["펜잘"],
+};
 
 function expandMarks(features) {
   const raw = [
@@ -21,6 +47,20 @@ function expandMarks(features) {
     if (m.length >= 3) expanded.push(m.slice(0, 3));
   }
   return [...new Set(expanded)].slice(0, 8);
+}
+
+function nameHintsForMark(mark) {
+  const m = cleanMark(mark);
+  if (!m) return [];
+  const hints = [];
+  if (IMPRINT_NAME_HINTS[m]) hints.push(...IMPRINT_NAME_HINTS[m]);
+  // prefix match in dictionary (e.g. TYLEN from TYLENOL)
+  for (const [key, names] of Object.entries(IMPRINT_NAME_HINTS)) {
+    if (key.startsWith(m) || m.startsWith(key.slice(0, Math.min(4, key.length)))) {
+      hints.push(...names);
+    }
+  }
+  return [...new Set(hints)].slice(0, 6);
 }
 
 /**
@@ -78,15 +118,39 @@ export async function matchFeaturesToDb(features, options = {}) {
       }
     }
     const list = (await apiFetch(query)) || [];
-    if (useCache) setCached(key, list);
-    ingest(list);
+    // Client-side imprint filter: API often ignores print_front and returns
+    // an unfiltered page. Prefer rows that actually match the requested mark.
+    let filtered = list;
+    if (query.print_front && list.length) {
+      const want = cleanMark(query.print_front);
+      const matched = list.filter((it) => {
+        const front = cleanMark(it.PRINT_FRONT || it.mark || "");
+        const back = cleanMark(it.PRINT_BACK || "");
+        return (
+          front === want ||
+          back === want ||
+          front.includes(want) ||
+          want.includes(front) ||
+          back.includes(want)
+        );
+      });
+      if (matched.length) filtered = matched;
+      else filtered = []; // don't ingest unrelated catalog dump
+    }
+    if (useCache) setCached(key, filtered);
+    ingest(filtered);
   };
 
-  // 1) Imprint-first
+  // 1) Imprint-first (print_front + item_name hints)
   for (const m of marks) {
     await pullCached({ print_front: m });
     if (color) await pullCached({ print_front: m, color_class1: color });
     if (shape) await pullCached({ print_front: m, drug_shape: shape });
+
+    // Service03: item_name is the reliable filter — map imprint → Korean names
+    for (const name of nameHintsForMark(m)) {
+      await pullCached({ item_name: name });
+    }
   }
 
   // 2) Color+shape only when imprint missing/ambiguous and allowed
