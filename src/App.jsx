@@ -35,17 +35,47 @@ import {
   EnsembleBuffer,
   fuseEnsembleVotes,
   buildEnsemblePipelineResult,
-  SmartStillCapture,
-  getSmartStillConfig,
 } from "./vision/pipeline.js";
 import { formatMetricsSummary, getMetrics } from "./vision/metrics.js";
-import { detectInstances } from "./vision/detectors/index.js";
 
 function matchSourceLabel(source) {
   if (source === "prescription") return "처방 목록 매칭";
   if (source === "full_db") return "전체 DB 검색";
   if (source === "fallback_llm") return "AI 추정(낮은 정확도)";
   return null;
+}
+
+/** Best-effort continuous autofocus + center focus point (device support varies). */
+async function enableContinuousAutofocus(stream) {
+  const track = stream?.getVideoTracks?.()?.[0];
+  if (!track) return;
+  try {
+    const caps =
+      typeof track.getCapabilities === "function" ? track.getCapabilities() : {};
+    const advanced = [];
+    if (Array.isArray(caps.focusMode)) {
+      if (caps.focusMode.includes("continuous")) {
+        advanced.push({ focusMode: "continuous" });
+      } else if (caps.focusMode.includes("single-shot")) {
+        advanced.push({ focusMode: "single-shot" });
+      }
+    }
+    if (caps.pointsOfInterest) {
+      advanced.push({ pointsOfInterest: [{ x: 0.5, y: 0.5 }] });
+    }
+    const base = {};
+    if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
+      base.focusMode = "continuous";
+    }
+    if (Object.keys(base).length || advanced.length) {
+      await track.applyConstraints({
+        ...base,
+        ...(advanced.length ? { advanced } : {}),
+      });
+    }
+  } catch (err) {
+    console.warn("[camera] autofocus not available", err);
+  }
 }
 
 // ---- Design tokens (reference images) ----
@@ -1024,10 +1054,13 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           facingMode: { ideal: "environment" },
           width: { ideal: 1280 },
           height: { ideal: 720 },
+          // Hint continuous AF where supported (Chrome/Android etc.)
+          advanced: [{ focusMode: "continuous" }],
         },
         audio: false,
       });
       streamRef.current = stream;
+      await enableContinuousAutofocus(stream);
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         try {
@@ -1036,8 +1069,29 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       }
       return true;
     } catch {
-      setCameraError("카메라 권한을 허용해주세요.");
-      return false;
+      // Retry without advanced focus constraint if device rejects it
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        });
+        streamRef.current = stream;
+        await enableContinuousAutofocus(stream);
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          try {
+            await videoRef.current.play();
+          } catch {}
+        }
+        return true;
+      } catch {
+        setCameraError("카메라 권한을 허용해주세요.");
+        return false;
+      }
     }
   };
 
@@ -1365,10 +1419,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     const throttleMsg = createMessageThrottle(400);
     const ensembleCfg = getEnsembleConfig();
     const ensembleBuf = new EnsembleBuffer(ensembleCfg);
-    const smartStill = new SmartStillCapture(getSmartStillConfig());
     let lastPipelineForEnsemble = null;
-    let stillPhaseDone = false;
-    let previewCountTick = 0;
 
     const fail = (msg) => {
       stopped = true;
@@ -1378,7 +1429,6 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       setDetectedMarks([]);
       setEnsembleActive(false);
       ensembleBuf.reset();
-      smartStill.reset();
     };
 
     const runSearchOnCanvas = async (canvas) =>
@@ -1463,51 +1513,13 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         const text = quality.messages[0] || "초점을 맞춰 주세요";
         const shown = throttleMsg(text);
         if (shown) setQualityHint(shown);
-        // still observe failed frames for score history continuity
-        smartStill.observe(frame, quality);
         timerId = setTimeout(tick, 200);
         return;
       }
 
-      // Lightweight preview object count (not shown as photo)
-      let previewObjectCount;
-      previewCountTick += 1;
-      if (previewCountTick % 3 === 0) {
-        try {
-          const light = await detectInstances(frame, {
-            scales: [640],
-            marginRatio: 0.12,
-            twoPass: false,
-            minConfidenceKeep: 0.22,
-          });
-          previewObjectCount = (light.detections || []).length;
-        } catch {
-          /* ignore */
-        }
-      }
-
-      const stillStatus = smartStill.observe(frame, quality, { previewObjectCount });
-      if (stillStatus.captured) {
-        const shown = throttleMsg(`좋은 순간 포착 (${stillStatus.stillCount}/${stillStatus.need})`);
-        if (shown) setQualityHint(shown);
-      } else if (!stillStatus.ready) {
-        const shown = throttleMsg(
-          `안정된 순간을 담는 중… (${stillStatus.stillCount}/${stillStatus.need})`
-        );
-        if (shown) setQualityHint(shown);
-      }
-
-      // Collect silent stills (B+C) before heavy OCR/API
-      if (!stillPhaseDone && !stillStatus.ready) {
-        timerId = setTimeout(tick, 180);
-        return;
-      }
-
-      // Timeout with zero stills → try current frame once if quality ok
-      if (!stillPhaseDone && stillStatus.ready && stillStatus.empty) {
-        smartStill.stills.push({ canvas: frame, score: quality.score, ts: Date.now(), method: "fallback-live" });
-      }
-      stillPhaseDone = true;
+      // Quality OK → recognize current frame immediately (no smart-still wait)
+      const okMsg = throttleMsg("인식 중…");
+      if (okMsg) setQualityHint(okMsg);
 
       totalTries += 1;
       if (totalTries > 12) {
@@ -1516,25 +1528,11 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       }
 
       try {
-        const rankedStills = smartStill.pickRanked();
-        const bestStill = rankedStills[0] || { canvas: frame, score: quality.score };
-        const analyzeList = rankedStills.length
-          ? rankedStills.slice(0, Math.min(3, rankedStills.length))
-          : [bestStill];
-
-        const okMsg = throttleMsg(
-          analyzeList.length > 1
-            ? `선명 컷 ${analyzeList.length}장으로 확인 중…`
-            : "선명 컷으로 인식 중…"
-        );
-        if (okMsg) setQualityHint(okMsg);
-        setEnsembleActive(analyzeList.length > 1);
-
-        let pipelineResult = await runSearchOnCanvas(bestStill.canvas);
+        let pipelineResult = await runSearchOnCanvas(frame);
 
         // Dual-side fusion path (optional)
         if (dualMode && frontCrop && pipelineResult.results?.[0]?.cropCanvas) {
-          pipelineResult = await runVisionSearch(bestStill.canvas, {
+          pipelineResult = await runVisionSearch(frame, {
             candidateFetcher,
             apiFetch: apiFetchPillIdentification,
             bagHints: getSessionBagHints(),
@@ -1551,57 +1549,17 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           });
         }
 
-        // Multi-still ensemble: analyze extra silent stills and fuse votes
-        if (analyzeList.length > 1) {
-          ensembleBuf.reset();
-          ensembleBuf.start();
-          const firstBest = (pipelineResult.results || []).filter((d) => d.best);
-          if (firstBest.length) {
-            lastPipelineForEnsemble = pipelineResult;
-            ensembleBuf.addFrame(firstBest);
-          }
-          for (const still of analyzeList.slice(1)) {
-            const extra = await runSearchOnCanvas(still.canvas);
-            const hits = (extra.results || []).filter((d) => d.best);
-            if (hits.length) {
-              lastPipelineForEnsemble = extra;
-              ensembleBuf.addFrame(hits);
-            }
-          }
-          if (ensembleBuf.getFrames().length >= 1) {
-            const fused = fuseEnsembleVotes(ensembleBuf.getFrames());
-            pipelineResult = buildEnsemblePipelineResult(
-              lastPipelineForEnsemble || pipelineResult,
-              fused
-            );
-          }
-          ensembleBuf.reset();
-        }
         setEnsembleActive(false);
 
         if (stopped || cancelledRef.current || processingRef.current) return;
 
         const dets = pipelineResult.results || [];
-        setPillBoxes(boxesFromDetections(dets, bestStill.canvas.width, bestStill.canvas.height));
+        setPillBoxes(boxesFromDetections(dets, frame.width, frame.height));
         if (debugMode) {
           setDebugInfo({
             ...(pipelineResult.debug || {}),
-            smartStill: {
-              count: smartStill.stills.length,
-              scores: smartStill.stills.map((s) => Number(s.score.toFixed(3))),
-              previewCountMode: smartStill.previewObjectCountMode(),
-            },
           });
           setMetricsSnap(formatMetricsSummary(getMetrics()));
-        }
-
-        // Cross-check preview object count vs final detections
-        const previewMode = smartStill.previewObjectCountMode();
-        const finalCount = dets.filter((d) => d.best).length || dets.length;
-        if (previewMode != null && finalCount > 0 && Math.abs(previewMode - finalCount) >= 2) {
-          setAccuracyWarning(
-            `실시간 추적(~${previewMode}개)과 최종 결과(${finalCount}개)가 달라 정확도가 낮을 수 있습니다.`
-          );
         }
 
         const withMark = dets.filter((d) => d.mark && d.mark.length >= 2);
@@ -1629,21 +1587,16 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           c.getContext("2d").drawImage(dets[0].cropCanvas, 0, 0);
           setFrontCrop(c);
           setCaptureSide("back");
-          stillPhaseDone = false;
-          smartStill.reset();
           timerId = setTimeout(tick, 400);
           return;
         }
 
         if (!withMark.length && !withBest.length) {
           emptyTries += 1;
-          // Allow one more smart-still cycle
           if (emptyTries >= 3) {
             fail("알약 각인(표기)을 읽지 못했습니다. 글자가 선명하게 보이게 비추거나 직접 입력해주세요.");
             return;
           }
-          stillPhaseDone = false;
-          smartStill.reset();
           timerId = setTimeout(tick, 220);
           return;
         }
@@ -1651,9 +1604,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         emptyTries = 0;
 
         if (withBest.length) {
-          // Phase 5 residual: only if still low after multi-still fuse
           const needsEnsemble = withBest.some((d) => shouldRequestEnsemble(d, ensembleCfg));
-          if (needsEnsemble && analyzeList.length < 2) {
+          if (needsEnsemble) {
             lastPipelineForEnsemble = pipelineResult;
             const st = ensembleBuf.addFrame(withBest);
             setEnsembleActive(true);
@@ -1661,8 +1613,6 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             const shown = throttleMsg(hint);
             if (shown) setQualityHint(shown);
             if (!st.ready) {
-              stillPhaseDone = false;
-              smartStill.reset();
               timerId = setTimeout(tick, 320);
               return;
             }
@@ -1673,8 +1623,6 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             const ok = await finalizePipelineResults(merged);
             if (!ok && !stopped && !cancelledRef.current) {
               processingRef.current = false;
-              stillPhaseDone = false;
-              smartStill.reset();
               timerId = setTimeout(tick, 260);
             }
             return;
@@ -1684,8 +1632,6 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           const ok = await finalizePipelineResults(pipelineResult);
           if (!ok && !stopped && !cancelledRef.current) {
             processingRef.current = false;
-            stillPhaseDone = false;
-            smartStill.reset();
             timerId = setTimeout(tick, 260);
           }
           return;
@@ -1976,7 +1922,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
                   ? captureSide === "back"
                     ? "앞면을 저장했습니다. 이제 뒷면 각인을 맞춰 주세요"
                     : "앞면+뒷면 모드: 먼저 앞면 각인을 맞춰 주세요"
-                  : "흰 배경에 알약을 펼치면, 좋은 순간을 자동으로 담아 인식합니다 (셔터 없음)"}
+                  : "흰 배경에 알약을 펼치면 자동으로 인식합니다 (셔터 없음)"}
               </p>
             )}
           </div>
@@ -2400,10 +2346,12 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
           facingMode: { ideal: "environment" },
           width: { ideal: 1280 },
           height: { ideal: 720 },
+          advanced: [{ focusMode: "continuous" }],
         },
         audio: false,
       });
       streamRef.current = stream;
+      await enableContinuousAutofocus(stream);
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         try {
@@ -2412,8 +2360,28 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
       }
       return true;
     } catch {
-      setCameraError("카메라 권한을 허용해주세요.");
-      return false;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        });
+        streamRef.current = stream;
+        await enableContinuousAutofocus(stream);
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          try {
+            await videoRef.current.play();
+          } catch {}
+        }
+        return true;
+      } catch {
+        setCameraError("카메라 권한을 허용해주세요.");
+        return false;
+      }
     }
   };
 
@@ -2607,12 +2575,6 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
     let lastKey = "";
     let confirmCount = 0;
     const throttleMsg = createMessageThrottle(450);
-    const smartStill = new SmartStillCapture({
-      ...getSmartStillConfig(),
-      minScore: Math.min(0.38, getSmartStillConfig().minScore),
-      timeoutMs: 3500,
-    });
-    let stillReady = false;
 
     const tick = async () => {
       if (bagCancelRef.current || bagBusyRef.current) return;
@@ -2633,36 +2595,16 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
         const textMsg = quality.messages[0] || "초점을 맞춰 주세요";
         const shown = throttleMsg(textMsg);
         if (shown) setQualityHint(shown);
-        smartStill.observe(frame, quality);
         timerId = setTimeout(tick, 280);
         return;
       }
 
-      const st = smartStill.observe(frame, quality);
-      if (st.captured) {
-        const shown = throttleMsg(`선명 컷 포착 (${st.stillCount}/${st.need})`);
-        if (shown) setQualityHint(shown);
-      } else if (!st.ready) {
-        const shown = throttleMsg(`문서가 안정되면 자동으로 담아요 (${st.stillCount}/${st.need})`);
-        if (shown) setQualityHint(shown);
-      }
-
-      if (!stillReady && !st.ready) {
-        timerId = setTimeout(tick, 200);
-        return;
-      }
-      if (!stillReady && st.ready && st.empty) {
-        smartStill.stills.push({ canvas: frame, score: quality.score, ts: Date.now(), method: "fallback-live" });
-      }
-      stillReady = true;
-
-      const best = smartStill.pickBest() || { canvas: frame };
-      const okHint = throttleMsg("선명 컷으로 글자 읽는 중…");
+      const okHint = throttleMsg("글자 읽는 중…");
       if (okHint) setQualityHint(okHint);
 
       bagBusyRef.current = true;
       try {
-        const docResult = await recognizeDocumentPipeline(best.canvas, {
+        const docResult = await recognizeDocumentPipeline(frame, {
           searchFn: async (name) => {
             const list = await searchPillList(name);
             return list.map((it) => ({
@@ -2678,8 +2620,6 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
         const names = (docResult.drugNames || []).filter(Boolean);
         const items = docResult.items || [];
         if (!names.length && !items.length) {
-          stillReady = false;
-          smartStill.reset();
           timerId = setTimeout(tick, 700);
           return;
         }
@@ -2696,7 +2636,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
 
         if (confirmCount >= 2) {
           bagCancelRef.current = true;
-          best.canvas.toBlob((blob) => {
+          frame.toBlob((blob) => {
             if (!blob) return;
             setSnapUrl((prev) => {
               if (prev) URL.revokeObjectURL(prev);
@@ -2704,15 +2644,12 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
             });
           }, "image/jpeg", 0.85);
           stopCamera();
-          await processCapturedCanvas(best.canvas);
+          await processCapturedCanvas(frame);
           return;
         }
 
         const wait = throttleMsg(`약 이름 확인 중… (${confirmCount}/2)`);
         if (wait) setQualityHint(wait);
-        // Re-collect stills for second confirm on a fresh good moment
-        stillReady = false;
-        smartStill.reset();
       } catch (e) {
         console.warn("[bag-live]", e);
       } finally {
