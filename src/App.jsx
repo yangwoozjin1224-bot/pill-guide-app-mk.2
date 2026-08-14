@@ -2158,7 +2158,12 @@ function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
         )}
 
         <button
-          onClick={() => { addToSchedule(pill); setRegistered(true); if (detailSource === "scan") speak("복용 관리에 등록되었습니다"); }}
+          onClick={() => {
+            addToSchedule(pill);
+            setRegistered(true);
+            if (detailSource === "scan") speak("복용 관리에 등록되었습니다");
+            setScreen("management");
+          }}
           className="w-full min-h-[52px] rounded-2xl font-bold text-[17px] mt-2"
           style={{ backgroundColor: registered ? GREEN : DETAIL_CTA_BG, color: "#fff" }}
         >
