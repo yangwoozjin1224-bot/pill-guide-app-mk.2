@@ -1,6 +1,11 @@
 /**
  * Observation-only vision LLM — extracts imprint/color/shape/score-line.
  * NEVER asks "what drug is this?" in this module.
+ *
+ * Supports:
+ *  - OpenAI Chat Completions (default)
+ *  - Google Gemini (Generative Language API) when provider=gemini
+ *    or model name starts with "gemini"
  */
 
 const OBSERVE_SYSTEM = `당신은 알약 이미지 관찰 도우미입니다.
@@ -28,12 +33,27 @@ function env(key, fallback = "") {
   return fallback;
 }
 
+function detectProvider(explicit, model) {
+  const p = String(explicit || "").toLowerCase();
+  if (p === "gemini" || p === "google") return "gemini";
+  if (p === "openai") return "openai";
+  if (String(model || "").toLowerCase().startsWith("gemini")) return "gemini";
+  return "openai";
+}
+
 export function getVisionLlmConfig() {
-  return {
-    apiKey: env("VITE_VISION_LLM_KEY", ""),
-    url: env("VITE_VISION_LLM_URL", "https://api.openai.com/v1/chat/completions"),
-    model: env("VITE_VISION_LLM_MODEL", "gpt-4o-mini"),
-  };
+  const apiKey =
+    env("VITE_VISION_LLM_KEY", "") ||
+    env("VITE_GEMINI_API_KEY", "") ||
+    env("GEMINI_API_KEY", "");
+  const model = env("VITE_VISION_LLM_MODEL", "gemini-2.0-flash");
+  const provider = detectProvider(env("VITE_VISION_LLM_PROVIDER", ""), model);
+  const url =
+    env("VITE_VISION_LLM_URL", "") ||
+    (provider === "gemini"
+      ? ""
+      : "https://api.openai.com/v1/chat/completions");
+  return { apiKey, url, model, provider };
 }
 
 export function isVisionLlmConfigured() {
@@ -79,6 +99,59 @@ function normalizeObservation(obj) {
   };
 }
 
+function splitDataUrl(dataUrl) {
+  const m = String(dataUrl || "").match(/^data:([^;]+);base64,(.+)$/);
+  if (!m) return null;
+  return { mime: m[1], data: m[2] };
+}
+
+async function callGeminiGenerate({ apiKey, model, system, userText, dataUrl }) {
+  const parts = [{ text: `${system}\n\n${userText}` }];
+  const split = splitDataUrl(dataUrl);
+  if (split) {
+    parts.push({ inline_data: { mime_type: split.mime, data: split.data } });
+  }
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    model
+  )}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts }],
+      generationConfig: { temperature: 0, maxOutputTokens: 400 },
+    }),
+  });
+  if (!res.ok) {
+    console.warn("[vision-llm] Gemini HTTP", res.status);
+    return "";
+  }
+  const json = await res.json();
+  return json?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("\n") || "";
+}
+
+async function callOpenAiChat({ apiKey, url, model, messages }) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0,
+      max_tokens: 300,
+      messages,
+    }),
+  });
+  if (!res.ok) {
+    console.warn("[vision-llm] OpenAI HTTP", res.status);
+    return "";
+  }
+  const json = await res.json();
+  return json?.choices?.[0]?.message?.content || "";
+}
+
 /**
  * Observe a single pill crop. Returns null if LLM not configured or request fails.
  */
@@ -110,27 +183,22 @@ export async function observePillFeatures(cropCanvas, options = {}) {
   try {
     let content = "";
     if (typeof options.fetcher === "function") {
-      content = await options.fetcher({ messages, model: cfg.model });
-    } else {
-      const res = await fetch(cfg.url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${cfg.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: cfg.model,
-          temperature: 0,
-          max_tokens: 300,
-          messages,
-        }),
+      content = await options.fetcher({ messages, model: cfg.model, provider: cfg.provider });
+    } else if (cfg.provider === "gemini") {
+      content = await callGeminiGenerate({
+        apiKey: cfg.apiKey,
+        model: cfg.model || "gemini-2.0-flash",
+        system: OBSERVE_SYSTEM,
+        userText,
+        dataUrl: options.imageUrl || dataUrl,
       });
-      if (!res.ok) {
-        console.warn("[vision-llm] HTTP", res.status);
-        return null;
-      }
-      const json = await res.json();
-      content = json?.choices?.[0]?.message?.content || "";
+    } else {
+      content = await callOpenAiChat({
+        apiKey: cfg.apiKey,
+        url: cfg.url || "https://api.openai.com/v1/chat/completions",
+        model: cfg.model,
+        messages,
+      });
     }
     return normalizeObservation(parseJsonLoose(content));
   } catch (e) {

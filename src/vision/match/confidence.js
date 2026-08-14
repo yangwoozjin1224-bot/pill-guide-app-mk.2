@@ -13,6 +13,24 @@ function cleanMark(s) {
     .replace(/[^A-Z0-9]/g, "");
 }
 
+/**
+ * True imprint overlap — never treat empty DB marks as a match
+ * (JS: "GEBORIN".includes("") === true caused 졸뎀속붕정 false positives).
+ */
+export function imprintOverlaps(queryMark, candidateMark) {
+  const q = cleanMark(queryMark);
+  const c = cleanMark(candidateMark);
+  if (q.length < 2 || c.length < 2) return false;
+  if (q === c) return true;
+  // Require meaningful substring (min 2 chars already); reject tiny stubs swallowing long marks
+  if (c.includes(q) || q.includes(c)) {
+    const shorter = Math.min(q.length, c.length);
+    const longer = Math.max(q.length, c.length);
+    return shorter >= 2 && shorter / longer >= 0.4;
+  }
+  return false;
+}
+
 function colorMatch(a, b) {
   const x = String(a || "").trim();
   const y = String(b || "").trim();
@@ -24,7 +42,22 @@ function shapeMatch(a, b) {
   const x = String(a || "").replace(/형$/, "").trim();
   const y = String(b || "").replace(/형$/, "").trim();
   if (!x || !y) return false;
-  return x === y || x.includes(y) || y.includes(x);
+  if (x === y) return true;
+  // Avoid "타원".includes("원") false positive
+  const aliases = {
+    원: ["원", "원형"],
+    타원: ["타원", "타원형", "장방"],
+    장방: ["장방", "장방형", "타원"],
+    삼각: ["삼각", "삼각형"],
+    사각: ["사각", "사각형"],
+    캡슐: ["캡슐", "캡슐형"],
+  };
+  for (const group of Object.values(aliases)) {
+    const xin = group.some((g) => x === g || x.startsWith(g));
+    const yin = group.some((g) => y === g || y.startsWith(g));
+    if (xin && yin) return true;
+  }
+  return false;
 }
 
 /**
@@ -50,12 +83,8 @@ export function scoreCandidateAgainstFeatures(item, features = {}) {
       bestImprint = Math.max(bestImprint, 100);
       reasons.push("imprint_exact");
       tier = "exact";
-    } else if (
-      (front.length >= 2 && (front.includes(m) || m.includes(front))) ||
-      (back.length >= 2 && (back.includes(m) || m.includes(back)))
-    ) {
-      const ref =
-        front.length >= 2 && (front.includes(m) || m.includes(front)) ? front || m : back || m;
+    } else if (imprintOverlaps(m, front) || imprintOverlaps(m, back)) {
+      const ref = imprintOverlaps(m, front) ? front || m : back || m;
       const overlap = Math.min(m.length, ref.length) / Math.max(m.length, ref.length, 1);
       const s = Math.round(45 + 40 * overlap);
       if (s > bestImprint) {
@@ -68,7 +97,7 @@ export function scoreCandidateAgainstFeatures(item, features = {}) {
     } else if (m.length >= 3 && front.length >= 3) {
       let pref = 0;
       while (pref < m.length && pref < front.length && m[pref] === front[pref]) pref += 1;
-      if (pref >= 2) {
+      if (pref >= 3) {
         const s = 28 + pref * 6;
         if (s > bestImprint) {
           bestImprint = s;

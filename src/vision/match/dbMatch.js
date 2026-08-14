@@ -8,7 +8,7 @@
  */
 
 import { cacheKey, getCached, setCached } from "./cache.js";
-import { rankCandidates, cleanMark } from "./confidence.js";
+import { rankCandidates, cleanMark, imprintOverlaps, colorMatch, shapeMatch } from "./confidence.js";
 
 /** Common OTC imprint → Korean product name hints for item_name queries */
 const IMPRINT_NAME_HINTS = {
@@ -124,18 +124,19 @@ export async function matchFeaturesToDb(features, options = {}) {
     if (query.print_front && list.length) {
       const want = cleanMark(query.print_front);
       const matched = list.filter((it) => {
-        const front = cleanMark(it.PRINT_FRONT || it.mark || "");
-        const back = cleanMark(it.PRINT_BACK || "");
-        return (
-          front === want ||
-          back === want ||
-          front.includes(want) ||
-          want.includes(front) ||
-          back.includes(want)
-        );
+        const front = it.PRINT_FRONT || it.mark || "";
+        const back = it.PRINT_BACK || "";
+        return imprintOverlaps(want, front) || imprintOverlaps(want, back);
       });
       if (matched.length) filtered = matched;
       else filtered = []; // don't ingest unrelated catalog dump
+    } else if ((query.color_class1 || query.drug_shape) && !query.item_name && !query.item_seq) {
+      // API often ignores color/shape — keep only rows that actually match
+      filtered = list.filter((it) => {
+        const okColor = !query.color_class1 || colorMatch(query.color_class1, it.COLOR_CLASS1 || it.color);
+        const okShape = !query.drug_shape || shapeMatch(query.drug_shape, it.DRUG_SHAPE || it.shape);
+        return okColor && okShape;
+      });
     }
     if (useCache) setCached(key, filtered);
     ingest(filtered);
@@ -153,7 +154,7 @@ export async function matchFeaturesToDb(features, options = {}) {
     }
   }
 
-  // 2) Color+shape only when imprint missing/ambiguous and allowed
+  // 2) Color+shape only when imprint missing — still ambiguous; never sole identity
   if (!marks.length && allowColorShapeOnly && (color || shape)) {
     const q = {};
     if (color) q.color_class1 = color;
@@ -162,11 +163,26 @@ export async function matchFeaturesToDb(features, options = {}) {
   }
 
   const items = Array.from(map.values());
-  let ranked = rankCandidates(items, features, { minScore: marks.length ? 22 : 18 });
+  // With an imprint query, drop color/shape-only rows that have no mark overlap
+  let pool = items;
+  if (marks.length) {
+    pool = items.filter((it) => {
+      const front = it.PRINT_FRONT || it.mark || "";
+      const back = it.PRINT_BACK || "";
+      return marks.some((m) => imprintOverlaps(m, front) || imprintOverlaps(m, back));
+    });
+  }
 
-  // If imprint existed but ranking empty, keep raw imprint API hits with weak score
-  if (!ranked.length && marks.length && items.length) {
-    ranked = rankCandidates(items, { ...features, markCandidates: marks }, { minScore: 10 });
+  let ranked = rankCandidates(pool, features, { minScore: marks.length ? 28 : 40 });
+
+  // If imprint existed but ranking empty, keep imprint-overlapping API hits only
+  if (!ranked.length && marks.length && pool.length) {
+    ranked = rankCandidates(pool, { ...features, markCandidates: marks }, { minScore: 22 });
+  }
+
+  // Never promote blank-imprint drugs (e.g. 졸뎀속붕정) via color alone when we had OCR marks
+  if (marks.length) {
+    ranked = ranked.filter((r) => r.tier === "exact" || r.tier === "partial");
   }
 
   const ambiguous = !marks.length || ranked.every((r) => r.tier === "color_shape" || r.tier === "weak");

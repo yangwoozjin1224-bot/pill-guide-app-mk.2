@@ -39,6 +39,38 @@ describe("scoreCandidateAgainstFeatures", () => {
     assert.equal(partial.tier, "partial");
     assert.ok(partial.confidence >= 0.5);
   });
+
+  it("does not match blank PRINT_FRONT to any query mark (졸뎀 bug)", () => {
+    const item = {
+      PRINT_FRONT: null,
+      PRINT_BACK: null,
+      COLOR_CLASS1: "하양",
+      DRUG_SHAPE: "원형",
+      ITEM_NAME: "졸뎀속붕정",
+    };
+    const scored = scoreCandidateAgainstFeatures(item, {
+      imprintFront: "GEBORIN",
+      color: "하양",
+      shape: "타원형",
+    });
+    assert.notEqual(scored.tier, "exact");
+    assert.notEqual(scored.tier, "partial");
+    assert.ok(scored.confidence < 0.4);
+  });
+
+  it("does not treat 타원 as matching 원 via substring", () => {
+    const item = {
+      PRINT_FRONT: "",
+      COLOR_CLASS1: "하양",
+      DRUG_SHAPE: "원형",
+    };
+    const scored = scoreCandidateAgainstFeatures(item, {
+      imprintFront: "",
+      color: "하양",
+      shape: "타원형",
+    });
+    assert.notEqual(scored.tier, "color_shape");
+  });
 });
 
 describe("rankCandidates", () => {
@@ -118,5 +150,34 @@ describe("matchFeaturesToDb", () => {
     assert.equal(out.ambiguous, true);
     assert.ok(out.candidates.length >= 1);
     assert.equal(out.candidates[0].tier, "color_shape");
+  });
+
+  it("does not ingest blank-imprint catalog rows for print_front queries", async () => {
+    const apiFetch = async (q) => {
+      if (q.print_front) {
+        return [
+          {
+            ITEM_SEQ: "200808948",
+            ITEM_NAME: "졸뎀속붕정(졸피뎀타르타르산염)",
+            PRINT_FRONT: null,
+            COLOR_CLASS1: "하양",
+            DRUG_SHAPE: "원형",
+          },
+          {
+            ITEM_SEQ: "197900277",
+            ITEM_NAME: "게보린정",
+            PRINT_FRONT: "GR",
+            COLOR_CLASS1: "분홍",
+            DRUG_SHAPE: "삼각형",
+          },
+        ];
+      }
+      return [];
+    };
+    const out = await matchFeaturesToDb(
+      { imprintFront: "GEBORIN", color: "하양", shape: "타원형", markCandidates: [] },
+      { apiFetch, useCache: false, allowColorShapeOnly: false }
+    );
+    assert.ok(!out.candidates.some((c) => String(c.name).includes("졸뎀")));
   });
 });

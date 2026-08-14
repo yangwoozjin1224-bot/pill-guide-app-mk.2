@@ -1213,16 +1213,17 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     processingRef.current = true;
     setStatus("loading");
 
-    // Accept DB hits; exact imprint can be slightly lower threshold than color-only
+    // Accept DB hits only with real imprint evidence (blocks 졸뎀속붕정 color-only false hits)
     const hits = (pipelineResult.results || []).filter((r) => {
       if (!r.best) return false;
       const conf = r.fusedConfidence ?? r.best.fusedScore ?? 0;
       const tier = r.matchTier || r.best.matchTier || "";
       if (tier === "exact") return conf >= 0.28;
       if (tier === "partial") return conf >= 0.35;
-      if (tier === "fallback") return conf >= 0.2; // shown with lowAccuracy warning
-      if (tier === "color_shape") return conf >= 0.4;
-      return conf >= 0.35;
+      // color_shape / weak / blank-imprint catalog luck — never auto-accept
+      if (tier === "color_shape" || tier === "weak" || tier === "none") return false;
+      if (tier === "fallback") return conf >= 0.45; // only with explicit lowAccuracy warning
+      return conf >= 0.4;
     });
     const marks = [...new Set(hits.map((r) => r.mark || r.imprintFront).filter(Boolean))];
     setDetectedMarks(marks);
@@ -1434,7 +1435,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         candidatePool: getPrescriptionDrugs(),
         frontBack: null,
         debug: debugMode,
-        // Fast live path: fewer pills, single scale, no LLM / heavy OCR TTA
+        // Fast live path: fewer pills, single scale, light OCR; Gemini only if OCR misses imprint
         fast: true,
         maxInstances: 3,
         shareByEmbedding: false,
@@ -1445,6 +1446,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         useLlm: false,
         useFallbackLlm: false,
         thoroughOcr: false,
+        allowColorShapeOnly: false,
       });
 
     const tick = async () => {
@@ -1470,8 +1472,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             const tier = d.matchTier || d.best.matchTier || "";
             if (tier === "exact") return conf >= 0.28;
             if (tier === "partial") return conf >= 0.35;
-            if (tier === "color_shape" || tier === "fallback") return conf >= 0.32;
-            return conf >= 0.35;
+            return false;
           });
           if (withMark.length) {
             setDetectedMarks([...new Set(withMark.map((d) => d.mark))]);
@@ -1574,8 +1575,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           const tier = d.matchTier || d.best.matchTier || "";
           if (tier === "exact") return conf >= 0.28;
           if (tier === "partial") return conf >= 0.35;
-          if (tier === "color_shape" || tier === "fallback") return conf >= 0.32;
-          return conf >= 0.35;
+          return false;
         });
         if (dets.some((d) => d.lowAccuracy)) {
           setAccuracyWarning((prev) => prev || "정확도가 낮을 수 있습니다. 후보를 확인해 주세요.");

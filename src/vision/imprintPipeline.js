@@ -11,6 +11,7 @@
 
 import { detectInstances, setCustomDetector, getActiveDetectorId } from "./detectors/index.js";
 import { extractPillFeatures } from "./features/extract.js";
+import { observePillFeatures, isVisionLlmConfigured } from "./features/visionLlm.js";
 import { matchFeaturesToDb } from "./match/dbMatch.js";
 import { fallbackMultimodalGuess } from "./match/fallbackLlm.js";
 import {
@@ -20,6 +21,7 @@ import {
 } from "./prescription/index.js";
 import { getOcrWorker } from "./ocr.js";
 import { logDetectionRun, logEndToEnd } from "./metrics.js";
+import { isValidImprintMark } from "./features/ocrImprint.js";
 
 export function getImprintPipelineConfig() {
   return {
@@ -151,7 +153,7 @@ export async function runImprintPipeline(sourceCanvas, options = {}) {
   const results = [];
   for (let i = 0; i < detections.length; i++) {
     const det = detections[i];
-    const features = await stageExtract(det.cropCanvas, {
+    let features = await stageExtract(det.cropCanvas, {
       box: det.box,
       area: det.area,
       shapeHint: det.shape,
@@ -161,6 +163,37 @@ export async function runImprintPipeline(sourceCanvas, options = {}) {
       thoroughOcr,
       fast,
     });
+
+    // Fast path: if OCR missed imprint but Gemini/LLM is configured, one assist call
+    if (
+      fast &&
+      !features.imprintFront &&
+      (useLlm || isVisionLlmConfigured() || llmFetcher)
+    ) {
+      try {
+        const llm = await observePillFeatures(det.cropCanvas, { fetcher: llmFetcher });
+        if (llm && isValidImprintMark(llm.imprintFront)) {
+          features = {
+            ...features,
+            imprintFront: llm.imprintFront,
+            imprintBack: llm.imprintBack || features.imprintBack,
+            markCandidates: [
+              ...new Set([
+                ...(features.markCandidates || []),
+                llm.imprintFront,
+                llm.imprintBack,
+              ].filter((m) => isValidImprintMark(m))),
+            ],
+            color: features.color || llm.color || "",
+            shape: features.shape || llm.shape || "",
+            sources: { ...features.sources, llm: true },
+            raw: { ...features.raw, llm },
+          };
+        }
+      } catch (e) {
+        console.warn("[imprint] gemini assist failed", e);
+      }
+    }
 
     let matchSource = null;
     let match = { candidates: [], empty: true, ambiguous: false };
