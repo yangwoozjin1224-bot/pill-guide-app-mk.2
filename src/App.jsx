@@ -1496,10 +1496,34 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           itemSeq: "201402898",
           name: "아발탄정10/160밀리그램",
           tag: "의약품",
-          time: "하루 1회",
-          timing: "의사·약사 지시에 따라 복용하세요",
-          effect: "고혈압 치료제 (암로디핀/발사르탄)",
-          caution: "처방·복약 안내를 확인하세요",
+          time: "1일 1회 1정",
+          timing: [
+            "기본 복용 방법",
+            "",
+            "용량 및 횟수: 보통 1일 1회 1정을 복용합니다.",
+            "",
+            "복용 시간: 식사 여부(식전/식후)와 관계없이 매일 같은 시간에 물과 함께 삼켜서 복용하는 것이 좋습니다.",
+            "",
+            "주의사항: 약을 씹거나 부수지 말고 그대로 물로 넘겨주세요.",
+          ].join("\n"),
+          effect: "고혈압 치료제 (암로디핀/발사르탄 복합)",
+          caution: [
+            "복용 시 주의해야 할 점",
+            "",
+            "임의 중단 금지",
+            "증상이 나아진 것 같아도 의사의 상담 없이 임의로 약 복용을 줄이거나 중단해서는 안 됩니다.",
+            "",
+            "자몽주스 섭취 자제",
+            "자몽주스는 약의 혈중 농도를 높여 부작용 위험을 증가시킬 수 있으므로 복용 기간 중에는 피하는 것이 좋습니다.",
+            "",
+            "어지럼증 주의",
+            "혈압이 낮아지면서 어지러움을 느낄 수 있으므로, 앉거나 누웠다가 일어날 때는 천천히 움직이세요.",
+            "",
+            "약 복용을 잊었을 때",
+            "생각난 즉시 복용하세요. 하지만 다음 복용 시간이 가까워졌다면 잊은 양은 건너뛰고 원래 시간에 다음 정량을 복용하세요. 절대로 한 번에 2배 용량을 복용하면 안 됩니다.",
+          ].join("\n"),
+          notice:
+            "Notice: 정확한 복용법과 주의사항은 환자의 건강 상태에 따라 달라질 수 있으므로, 처방받으신 병원이나 약국의 안내를 가장 우선으로 따라주시기 바랍니다.",
           durWarning: null,
           imageUrl:
             "https://nedrug.mfds.go.kr/pbp/cmn/itemImageDownload/147426878513600052",
@@ -1514,7 +1538,19 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             schedule
           );
           if (detail?.itemSeq || detail?.name) {
-            pill = { ...fallback, ...detail, name: detail.name || fallback.name, detectedMark: "DC" };
+            // Keep demo dosage/caution copy for filming; merge image/name from API when present
+            pill = {
+              ...fallback,
+              ...detail,
+              name: detail.name || fallback.name,
+              imageUrl: detail.imageUrl || fallback.imageUrl,
+              timing: fallback.timing,
+              caution: fallback.caution,
+              effect: fallback.effect,
+              notice: fallback.notice,
+              time: fallback.time,
+              detectedMark: "DC",
+            };
           }
         } catch {
           /* use fallback for offline demo */
@@ -2084,10 +2120,21 @@ function FeedbackStatsScreen({ setScreen }) {
 function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
   const [registered, setRegistered] = useState(false);
 
+  const buildDetailSpeech = (p) =>
+    [
+      p.name,
+      p.tag,
+      p.timing,
+      p.effect,
+      p.caution,
+      p.notice,
+    ]
+      .filter(Boolean)
+      .join(". ");
+
   useEffect(() => {
     if (!pill || detailSource !== "scan") return;
-    const intro = `${pill.name}. ${pill.tag}. ${pill.timing}`;
-    const t = setTimeout(() => speak(intro), 400);
+    const t = setTimeout(() => speak(buildDetailSpeech(pill)), 400);
     return () => clearTimeout(t);
   }, [pill?.id, pill?.name, detailSource]);
 
@@ -2101,7 +2148,10 @@ function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
           <ChevronLeft size={28} color={BLACK} />
         </button>
         {detailSource === "scan" && (
-          <button onClick={() => speak(`${pill.name}. ${pill.tag}. ${pill.timing}`)} className="ml-auto w-[40px] h-[40px] flex items-center justify-center">
+          <button
+            onClick={() => speak(buildDetailSpeech(pill))}
+            className="ml-auto w-[40px] h-[40px] flex items-center justify-center"
+          >
             <Volume2 size={22} color={GRAY2} />
           </button>
         )}
@@ -2136,10 +2186,16 @@ function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
         <Section title="1. 기본 정보">
           <p className="text-[13px] leading-relaxed" style={{ color: GRAY2 }}>
             <b>분류:</b> {pill.tag}
+            {pill.time ? (
+              <>
+                <br />
+                <b>복용:</b> {pill.time}
+              </>
+            ) : null}
           </p>
         </Section>
 
-        <Section title="2. 복용 방법">
+        <Section title="2. 기본 복용 방법">
           <p className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: GRAY2 }}>{pill.timing || "정보 없음"}</p>
         </Section>
 
@@ -2147,12 +2203,18 @@ function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
           <p className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: GRAY2 }}>{pill.effect || "정보 없음"}</p>
         </Section>
 
-        <Section title="4. 주의사항">
+        <Section title="4. 복용 시 주의해야 할 점">
           <p className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: GRAY2 }}>{pill.caution || "정보 없음"}</p>
         </Section>
 
+        {pill.notice && (
+          <Section title="5. Notice">
+            <p className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: GRAY2 }}>{pill.notice}</p>
+          </Section>
+        )}
+
         {pill.durWarning && (
-          <Section title="5. 병용 금기">
+          <Section title="6. 병용 금기">
             <p className="text-[13px] leading-relaxed" style={{ color: RED }}>{pill.durWarning}</p>
           </Section>
         )}
