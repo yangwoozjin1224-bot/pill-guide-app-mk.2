@@ -556,7 +556,9 @@ function speak(text) {
     window.speechSynthesis.cancel();
     const utter = new SpeechSynthesisUtterance(text);
     utter.lang = "ko-KR";
-    utter.rate = 0.95;
+    utter.rate = 0.9;
+    utter.pitch = 1;
+    utter.volume = 1; // max browser volume
     window.speechSynthesis.speak(utter);
   } catch (e) { console.error("TTS error", e); }
 }
@@ -2120,17 +2122,9 @@ function FeedbackStatsScreen({ setScreen }) {
 function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
   const [registered, setRegistered] = useState(false);
 
+  // TTS: 1·2번만 (이름/기본정보/복용방법) — 3·4·5(효능·주의·Notice)는 화면만
   const buildDetailSpeech = (p) =>
-    [
-      p.name,
-      p.tag,
-      p.timing,
-      p.effect,
-      p.caution,
-      p.notice,
-    ]
-      .filter(Boolean)
-      .join(". ");
+    [p.name, p.tag, p.time, p.timing].filter(Boolean).join(". ");
 
   useEffect(() => {
     if (!pill || detailSource !== "scan") return;
@@ -2150,9 +2144,11 @@ function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
         {detailSource === "scan" && (
           <button
             onClick={() => speak(buildDetailSpeech(pill))}
-            className="ml-auto w-[40px] h-[40px] flex items-center justify-center"
+            className="ml-auto w-[52px] h-[52px] flex items-center justify-center rounded-full"
+            style={{ backgroundColor: "#F3F4F6" }}
+            aria-label="읽어주기"
           >
-            <Volume2 size={22} color={GRAY2} />
+            <Volume2 size={30} color={BLACK} />
           </button>
         )}
       </div>
