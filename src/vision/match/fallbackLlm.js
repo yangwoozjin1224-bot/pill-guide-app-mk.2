@@ -13,6 +13,32 @@ const FALLBACK_SYSTEM = `당신은 의약품 식별 보조입니다.
   "warning": "정확도가 낮을 수 있습니다"
 }`;
 
+function splitDataUrl(dataUrl) {
+  const m = String(dataUrl || "").match(/^data:([^;]+);base64,(.+)$/);
+  if (!m) return null;
+  return { mime: m[1], data: m[2] };
+}
+
+async function callGeminiFallback(cfg, userText, dataUrl) {
+  const parts = [{ text: `${FALLBACK_SYSTEM}\n\n${userText}` }];
+  const split = splitDataUrl(dataUrl);
+  if (split) parts.push({ inline_data: { mime_type: split.mime, data: split.data } });
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    cfg.model || "gemini-2.0-flash"
+  )}:generateContent?key=${encodeURIComponent(cfg.apiKey)}`;
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 400 },
+    }),
+  });
+  if (!res.ok) return "";
+  const json = await res.json();
+  return json?.candidates?.[0]?.content?.parts?.map((p) => p.text).filter(Boolean).join("\n") || "";
+}
+
 /**
  * @returns {Promise<null | { guesses: array, lowAccuracy: true, warning: string }>}
  */
@@ -33,15 +59,14 @@ export async function fallbackMultimodalGuess(cropCanvas, features = {}, options
     .filter(Boolean)
     .join(", ");
 
+  const userText = `DB 매칭 실패. 추출 특징: ${featText || "없음"}. 가능한 국내 알약 이름 후보를 최대 3개 제안하세요.`;
+
   const messages = [
     { role: "system", content: FALLBACK_SYSTEM },
     {
       role: "user",
       content: [
-        {
-          type: "text",
-          text: `DB 매칭 실패. 추출 특징: ${featText || "없음"}. 가능한 국내 알약 이름 후보를 최대 3개 제안하세요.`,
-        },
+        { type: "text", text: userText },
         { type: "image_url", image_url: { url: options.imageUrl || dataUrl } },
       ],
     },
@@ -50,9 +75,16 @@ export async function fallbackMultimodalGuess(cropCanvas, features = {}, options
   try {
     let content = "";
     if (typeof options.fetcher === "function") {
-      content = await options.fetcher({ messages, model: cfg.model, mode: "fallback" });
+      content = await options.fetcher({
+        messages,
+        model: cfg.model,
+        mode: "fallback",
+        provider: cfg.provider,
+      });
+    } else if (cfg.provider === "gemini") {
+      content = await callGeminiFallback(cfg, userText, options.imageUrl || dataUrl);
     } else {
-      const res = await fetch(cfg.url, {
+      const res = await fetch(cfg.url || "https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -78,8 +110,8 @@ export async function fallbackMultimodalGuess(cropCanvas, features = {}, options
             confidence: Math.min(0.5, Number(g.confidence) || 0.25),
             reason: String(g.reason || ""),
           }))
-      .filter((g) => g.name)
-      .slice(0, 3)
+          .filter((g) => g.name)
+          .slice(0, 3)
       : [];
 
     if (!guesses.length) return null;
