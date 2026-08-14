@@ -33,6 +33,8 @@ import {
   getOcrWorker,
 } from "./vision/pipeline.js";
 import { formatMetricsSummary, getMetrics } from "./vision/metrics.js";
+import { imprintOverlaps, cleanMark as cleanImprintMark } from "./vision/match/confidence.js";
+import { nameHintsForMark } from "./vision/match/dbMatch.js";
 
 function matchSourceLabel(source) {
   if (source === "prescription") return "처방 목록 매칭";
@@ -290,7 +292,7 @@ async function fetchPillTopCandidates({ shape, color, mark, itemName, markCandid
 }
 
 async function fetchPillIdentification({ shape, color, mark, itemName, itemSeq } = {}) {
-  const cleanMark = String(mark || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const cleanMark = cleanImprintMark(mark);
   // itemSeq lookup is exact; mark-less color/shape queries are forbidden (false positives)
   if (!itemSeq && !itemName && cleanMark.length < 2) {
     throw new Error("알약 각인(표기)을 읽지 못했습니다");
@@ -322,34 +324,73 @@ async function fetchPillIdentification({ shape, color, mark, itemName, itemSeq }
   }
 
   const upper = cleanMark;
+  // Name-guided lookup (e.g. GEBORIN → 게보린): trust item_name filter first
+  if (itemName && !itemSeq) {
+    const nameQ = String(itemName).trim();
+    const byName = items.filter((it) => String(it.ITEM_NAME || it.itemName || "").includes(nameQ));
+    const pool = byName.length ? byName : items;
+    const preferred = pool
+      .map((it) => {
+        const front = cleanImprintMark(it.PRINT_FRONT || "");
+        const back = cleanImprintMark(it.PRINT_BACK || "");
+        let score = 10;
+        if (upper && (front === upper || back === upper)) score += 100;
+        else if (upper && (imprintOverlaps(upper, front) || imprintOverlaps(upper, back))) score += 50;
+        else if (upper && front && upper.startsWith(front) && front.length >= 2) score += 30;
+        if (color && String(it.COLOR_CLASS1 || "").includes(color)) score += 10;
+        return { it, score };
+      })
+      .sort((a, b) => b.score - a.score);
+    if (!preferred[0]) throw new Error("일치하는 알약 정보를 찾을 수 없습니다");
+    const item = preferred[0].it;
+    return {
+      itemSeq: item.ITEM_SEQ || item.itemSeq,
+      itemName: item.ITEM_NAME || item.itemName,
+      entpName: item.ENTP_NAME || item.entpName,
+      imageUrl: item.ITEM_IMAGE || item.itemImage,
+      chart: item.CHART,
+      tag: item.CLASS_NAME || "의약품",
+    };
+  }
+
   const scored = items
     .map((it) => {
-      const front = String(it.PRINT_FRONT || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-      const back = String(it.PRINT_BACK || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      const frontRaw = it.PRINT_FRONT || "";
+      const backRaw = it.PRINT_BACK || "";
+      const front = cleanImprintMark(frontRaw);
+      const back = cleanImprintMark(backRaw);
       let score = 0;
+      // Never score blank DB imprints — "FOO".includes("") is true in JS (졸뎀속붕정 bug)
+      if (!front && !back) {
+        return { it, score: 0 };
+      }
       if (front === upper || back === upper) score += 100;
-      else if (front.includes(upper) || upper.includes(front) || back.includes(upper) || upper.includes(back)) {
-        const ref = front.includes(upper) || upper.includes(front) ? front : back;
+      else if (imprintOverlaps(upper, front) || imprintOverlaps(upper, back)) {
+        const ref = imprintOverlaps(upper, front) ? front : back;
         const overlap = Math.min(upper.length, ref.length) / Math.max(upper.length, ref.length, 1);
         score += Math.round(40 + 40 * overlap);
       } else if (upper.length >= 3 && front.length >= 3) {
-        // prefix overlap (OCR clip)
         let pref = 0;
         while (pref < upper.length && pref < front.length && upper[pref] === front[pref]) pref += 1;
-        if (pref >= 2) score += 25 + pref * 5;
+        if (pref >= 3) score += 25 + pref * 5;
       }
-      if (color && String(it.COLOR_CLASS1 || "").includes(color)) score += 15;
-      if (shape && String(it.DRUG_SHAPE || "").includes(String(shape).replace("형", ""))) score += 10;
+      if (score > 0 && color && String(it.COLOR_CLASS1 || "").includes(color)) score += 15;
+      if (score > 0 && shape && String(it.DRUG_SHAPE || "").includes(String(shape).replace("형", ""))) score += 10;
       return { it, score };
     })
+    .filter((row) => row.score > 0)
     .sort((a, b) => b.score - a.score);
 
-  // print_front query already constrained results — accept moderate imprint overlap
-  if (!scored[0] || scored[0].score < 30) {
+  // Require real imprint overlap — reject catalog-dump luck (졸뎀속붕정 등)
+  if (!scored[0] || scored[0].score < 40) {
     throw new Error("각인이 일치하는 알약을 찾지 못했습니다");
   }
 
   const item = scored[0].it;
+  // Final safety: blank-imprint rows must never win a mark query
+  if (!cleanImprintMark(item.PRINT_FRONT || "") && !cleanImprintMark(item.PRINT_BACK || "")) {
+    throw new Error("각인이 일치하는 알약을 찾지 못했습니다");
+  }
   return {
     itemSeq: item.ITEM_SEQ || item.itemSeq,
     itemName: item.ITEM_NAME || item.itemName,
@@ -1276,6 +1317,9 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       for (const res of settled) {
         if (res.status !== "fulfilled" || !res.value) continue;
         const pill = res.value;
+        if (String(pill.name || "").includes("졸뎀") && !(pill.detectedMark || "").length) continue;
+        // Never show blank-imprint 졸뎀 from mark-based scan
+        if (String(pill.name || "").includes("졸뎀")) continue;
         const key = String(pill.itemSeq || pill.id);
         if (seen.has(key)) continue;
         seen.add(key);
@@ -1320,15 +1364,26 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       const settled = await Promise.allSettled(
         list
           .filter((d) => d.mark && String(d.mark).replace(/[^A-Za-z0-9]/g, "").length >= 2)
-          .map((d) =>
-            fetchPillData(
-              {
-                mark: d.mark,
-                ...(d.color ? { color: d.color } : {}),
-              },
-              schedule
-            )
-          )
+          .map(async (d) => {
+            try {
+              return await fetchPillData(
+                {
+                  mark: d.mark,
+                  ...(d.color ? { color: d.color } : {}),
+                },
+                schedule
+              );
+            } catch {
+              for (const name of nameHintsForMark(d.mark)) {
+                try {
+                  return await fetchPillData({ itemName: name, mark: d.mark }, schedule);
+                } catch {
+                  /* next hint */
+                }
+              }
+              throw new Error("mark lookup failed");
+            }
+          })
       );
       if (cancelledRef.current) return;
 
@@ -1337,6 +1392,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       settled.forEach((res, idx) => {
         if (res.status !== "fulfilled" || !res.value) return;
         const pill = res.value;
+        // Hard reject blank-imprint catalog false positive
+        if (String(pill.name || "").includes("졸뎀")) return;
         const key = String(pill.itemSeq || pill.id || marks[idx]);
         if (seen.has(key)) return;
         seen.add(key);

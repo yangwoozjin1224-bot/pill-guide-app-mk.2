@@ -46,7 +46,7 @@ export function getVisionLlmConfig() {
     env("VITE_VISION_LLM_KEY", "") ||
     env("VITE_GEMINI_API_KEY", "") ||
     env("GEMINI_API_KEY", "");
-  const model = env("VITE_VISION_LLM_MODEL", "gemini-2.0-flash");
+  const model = env("VITE_VISION_LLM_MODEL", "gemini-flash-latest");
   const provider = detectProvider(env("VITE_VISION_LLM_PROVIDER", ""), model);
   const url =
     env("VITE_VISION_LLM_URL", "") ||
@@ -187,7 +187,7 @@ export async function observePillFeatures(cropCanvas, options = {}) {
     } else if (cfg.provider === "gemini") {
       content = await callGeminiGenerate({
         apiKey: cfg.apiKey,
-        model: cfg.model || "gemini-2.0-flash",
+        model: cfg.model || "gemini-flash-latest",
         system: OBSERVE_SYSTEM,
         userText,
         dataUrl: options.imageUrl || dataUrl,

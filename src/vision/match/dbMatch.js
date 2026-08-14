@@ -11,11 +11,12 @@ import { cacheKey, getCached, setCached } from "./cache.js";
 import { rankCandidates, cleanMark, imprintOverlaps, colorMatch, shapeMatch } from "./confidence.js";
 
 /** Common OTC imprint → Korean product name hints for item_name queries */
-const IMPRINT_NAME_HINTS = {
+export const IMPRINT_NAME_HINTS = {
   TYLENOL: ["타이레놀"],
   TYLENOLER: ["타이레놀"],
   TYME: ["우먼스타이레놀", "타이레놀"],
   GEBORIN: ["게보린"],
+  GEVORIN: ["게보린"],
   ADVIL: ["애드빌"],
   ZYRTEC: ["지르텍"],
   ASPIRIN: ["아스피린"],
@@ -31,7 +32,7 @@ const IMPRINT_NAME_HINTS = {
   PENZAL: ["펜잘"],
 };
 
-function expandMarks(features) {
+export function expandMarks(features) {
   const raw = [
     features.imprintFront,
     features.imprintBack,
@@ -49,7 +50,7 @@ function expandMarks(features) {
   return [...new Set(expanded)].slice(0, 8);
 }
 
-function nameHintsForMark(mark) {
+export function nameHintsForMark(mark) {
   const m = cleanMark(mark);
   if (!m) return [];
   const hints = [];

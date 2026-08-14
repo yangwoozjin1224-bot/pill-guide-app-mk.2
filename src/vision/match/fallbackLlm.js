@@ -24,7 +24,7 @@ async function callGeminiFallback(cfg, userText, dataUrl) {
   const split = splitDataUrl(dataUrl);
   if (split) parts.push({ inline_data: { mime_type: split.mime, data: split.data } });
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    cfg.model || "gemini-2.0-flash"
+    cfg.model || "gemini-flash-latest"
   )}:generateContent?key=${encodeURIComponent(cfg.apiKey)}`;
   const res = await fetch(endpoint, {
     method: "POST",

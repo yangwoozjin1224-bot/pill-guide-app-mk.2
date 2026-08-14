@@ -221,7 +221,7 @@ export async function runImprintPipeline(sourceCanvas, options = {}) {
       match = await stageMatch(features, {
         apiFetch: fetchFn,
         topK,
-        allowColorShapeOnly: true,
+        allowColorShapeOnly: options.allowColorShapeOnly === true && !fast,
       });
       if (!match.empty) {
         matchSource = "full_db";
