@@ -1457,7 +1457,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     setResumeKey((k) => k + 1);
   };
 
-  // Detection → Classification → Re-rank pipeline loop
+  // DEMO VIDEO: ~6초 후 아발탄정10/160밀리그램 고정 결과 (촬영용)
   useEffect(() => {
     if (cameraError) return;
 
@@ -1468,235 +1468,73 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     setPillBoxes([]);
     setErrorMsg("");
     setEnsembleActive(false);
+    setQualityOk(true);
+    setQualityHint("흰 배경에 알약을 맞춰 주세요");
+    setAccuracyWarning("");
 
-    let timerId = null;
-    let stopped = false;
-    let emptyTries = 0;
-    let totalTries = 0;
-    const throttleMsg = createMessageThrottle(400);
-
-    const fail = (msg) => {
-      stopped = true;
-      processingRef.current = true;
-      setStatus("error");
-      setErrorMsg(msg);
-      setDetectedMarks([]);
-      setEnsembleActive(false);
-    };
-
-    const runSearchOnCanvas = async (canvas) =>
-      runVisionSearch(canvas, {
-        candidateFetcher,
-        apiFetch: apiFetchPillIdentification,
-        bagHints: getSessionBagHints(),
-        candidatePool: getPrescriptionDrugs(),
-        frontBack: null,
-        debug: debugMode,
-        // Fast live path: fewer pills, single scale, light OCR; Gemini only if OCR misses imprint
-        fast: true,
-        maxInstances: 3,
-        shareByEmbedding: false,
-        scales: [640],
-        minConfidenceKeep: 0.22,
-        twoPass: false,
-        topK: 5,
-        useLlm: false,
-        useFallbackLlm: false,
-        thoroughOcr: false,
-        allowColorShapeOnly: false,
-      });
-
-    const tick = async () => {
-      if (stopped || cancelledRef.current || processingRef.current) return;
-
-      // 앨범 사진: 품질게이트/스마트스틸을 건너뛰고 즉시 1회 인식
-      if (forceGalleryRef.current && galleryCanvasRef.current) {
-        const galleryFrame = galleryCanvasRef.current;
-        forceGalleryRef.current = false;
+    const timers = [];
+    timers.push(
+      setTimeout(() => {
+        if (cancelledRef.current) return;
+        setQualityHint("알약을 인식하고 있어요…");
+      }, 1800)
+    );
+    timers.push(
+      setTimeout(() => {
+        if (cancelledRef.current) return;
+        setStatus("loading");
+        setQualityHint("약 정보를 확인하고 있어요…");
+      }, 4000)
+    );
+    timers.push(
+      setTimeout(async () => {
+        if (cancelledRef.current) return;
         processingRef.current = true;
         setStatus("loading");
-        setQualityOk(true);
-        setQualityHint("앨범 사진으로 인식 중…");
+        const fallback = {
+          id: "201402898",
+          itemSeq: "201402898",
+          name: "아발탄정10/160밀리그램",
+          tag: "의약품",
+          time: "하루 1회",
+          timing: "의사·약사 지시에 따라 복용하세요",
+          effect: "고혈압 치료제 (암로디핀/발사르탄)",
+          caution: "처방·복약 안내를 확인하세요",
+          durWarning: null,
+          imageUrl:
+            "https://nedrug.mfds.go.kr/pbp/cmn/itemImageDownload/147426878513600052",
+          entpName: "",
+          detectedMark: "DC",
+        };
+        let pill = fallback;
         try {
-          const pipelineResult = await runSearchOnCanvas(galleryFrame);
-          if (stopped || cancelledRef.current) return;
-          const dets = pipelineResult.results || [];
-          setPillBoxes(boxesFromDetections(dets, galleryFrame.width, galleryFrame.height));
-          const withMark = dets.filter((d) => d.mark && d.mark.length >= 2);
-          const withBest = dets.filter((d) => {
-            if (!d.best) return false;
-            const conf = d.fusedConfidence ?? d.best.fusedScore ?? 0;
-            const tier = d.matchTier || d.best.matchTier || "";
-            if (tier === "exact") return conf >= 0.28;
-            if (tier === "partial") return conf >= 0.35;
-            return false;
-          });
-          if (withMark.length) {
-            setDetectedMarks([...new Set(withMark.map((d) => d.mark))]);
+          const detail = await fetchPillDetailBySeq(
+            "201402898",
+            "아발탄정10/160밀리그램",
+            schedule
+          );
+          if (detail?.itemSeq || detail?.name) {
+            pill = { ...fallback, ...detail, name: detail.name || fallback.name, detectedMark: "DC" };
           }
-          if (withBest.length) {
-            const ok = await finalizePipelineResults(pipelineResult);
-            if (!ok) {
-              fail("사진에서 약을 특정하지 못했습니다. 다른 사진으로 시도하거나 표기를 직접 입력해주세요.");
-            }
-            return;
-          }
-          if (withMark.length) {
-            await lookupMarks(withMark.map((d) => ({ mark: d.mark, color: d.color || "" })));
-            return;
-          }
-          fail("사진에서 알약/각인을 찾지 못했습니다. 알약이 크게·선명하게 나온 사진을 선택해주세요.");
-        } catch (err) {
-          console.warn("gallery pipeline error", err);
-          fail(err.message || "앨범 사진 인식에 실패했습니다.");
+        } catch {
+          /* use fallback for offline demo */
         }
-        return;
-      }
-
-      if (!videoRef.current?.videoWidth) {
-        timerId = setTimeout(tick, 80);
-        return;
-      }
-
-      const frame = captureFrame();
-      if (!frame) {
-        timerId = setTimeout(tick, 80);
-        return;
-      }
-
-      // Phase 2: live quality (realtime track)
-      const quality = evaluateCaptureQuality(frame, { mode: "pill" });
-      setQualityOk(quality.ok);
-      if (!quality.ok) {
-        const text = quality.messages[0] || "초점을 맞춰 주세요";
-        const shown = throttleMsg(text);
-        if (shown) setQualityHint(shown);
-        timerId = setTimeout(tick, 120);
-        return;
-      }
-
-      // Quality OK → recognize current frame immediately (no smart-still wait)
-      const okMsg = throttleMsg("인식 중…");
-      if (okMsg) setQualityHint(okMsg);
-
-      totalTries += 1;
-      if (totalTries > 12) {
-        fail("알약 인식에 실패했습니다. 각인(글자)이 보이게 가까이 비추거나, 표기를 직접 입력해주세요.");
-        return;
-      }
-
-      try {
-        let pipelineResult = await runSearchOnCanvas(frame);
-
-        // Dual-side fusion path (optional)
-        if (dualMode && frontCrop && pipelineResult.results?.[0]?.cropCanvas) {
-          pipelineResult = await runVisionSearch(frame, {
-            candidateFetcher,
-            apiFetch: apiFetchPillIdentification,
-            bagHints: getSessionBagHints(),
-            candidatePool: getPrescriptionDrugs(),
-            frontBack: {
-              frontCanvas: frontCrop,
-              backCanvas: pipelineResult.results[0].cropCanvas,
-            },
-            debug: debugMode,
-            fast: true,
-            maxInstances: 1,
-            shareByEmbedding: false,
-            scales: [640],
-            twoPass: false,
-            topK: 5,
-            useLlm: false,
-            useFallbackLlm: false,
-            thoroughOcr: false,
-          });
-        }
-
-        setEnsembleActive(false);
-
-        if (stopped || cancelledRef.current || processingRef.current) return;
-
-        const dets = pipelineResult.results || [];
-        setPillBoxes(boxesFromDetections(dets, frame.width, frame.height));
-        if (debugMode) {
-          setDebugInfo({
-            ...(pipelineResult.debug || {}),
-          });
-          setMetricsSnap(formatMetricsSummary(getMetrics()));
-        }
-
-        const withMark = dets.filter((d) => d.mark && d.mark.length >= 2);
-        const withBest = dets.filter((d) => {
-          if (!d.best) return false;
-          const conf = d.fusedConfidence ?? d.best.fusedScore ?? 0;
-          const tier = d.matchTier || d.best.matchTier || "";
-          if (tier === "exact") return conf >= 0.28;
-          if (tier === "partial") return conf >= 0.35;
-          return false;
-        });
-        if (dets.some((d) => d.lowAccuracy)) {
-          setAccuracyWarning((prev) => prev || "정확도가 낮을 수 있습니다. 후보를 확인해 주세요.");
-        }
-
-        if (withMark.length) {
-          setDetectedMarks([...new Set(withMark.map((d) => d.mark))]);
-        }
-
-        if (dualMode && !frontCrop && dets[0]?.cropCanvas) {
-          const c = document.createElement("canvas");
-          c.width = dets[0].cropCanvas.width;
-          c.height = dets[0].cropCanvas.height;
-          c.getContext("2d").drawImage(dets[0].cropCanvas, 0, 0);
-          setFrontCrop(c);
-          setCaptureSide("back");
-          timerId = setTimeout(tick, 200);
-          return;
-        }
-
-        if (!withMark.length && !withBest.length) {
-          emptyTries += 1;
-          if (emptyTries >= 3) {
-            fail("알약 각인(표기)을 읽지 못했습니다. 글자가 선명하게 보이게 비추거나 직접 입력해주세요.");
-            return;
-          }
-          timerId = setTimeout(tick, 100);
-          return;
-        }
-
-        emptyTries = 0;
-
-        if (withBest.length) {
-          // Skip multi-frame ensemble in live path — finalize immediately for speed
-          setEnsembleActive(false);
-          const ok = await finalizePipelineResults(pipelineResult);
-          if (!ok && !stopped && !cancelledRef.current) {
-            processingRef.current = false;
-            timerId = setTimeout(tick, 120);
-          }
-          return;
-        }
-
-        if (withMark.length) {
-          await lookupMarks(withMark.map((d) => ({ mark: d.mark, color: d.color || "" })));
-          return;
-        }
-
-        timerId = setTimeout(tick, 120);
-      } catch (err) {
-        console.warn("pipeline tick error", err);
-        if (!stopped && !cancelledRef.current && !processingRef.current) {
-          timerId = setTimeout(tick, 150);
-        }
-      }
-    };
-
-    timerId = setTimeout(tick, 120);
+        if (cancelledRef.current) return;
+        stopCamera();
+        setDetectedMarks(["DC"]);
+        setStatus("found");
+        setDetailSource("scan");
+        setActivePill(pill);
+        setScreen("detail");
+      }, 6000)
+    );
 
     return () => {
-      stopped = true;
-      if (timerId) clearTimeout(timerId);
+      cancelledRef.current = true;
+      timers.forEach(clearTimeout);
     };
-  }, [cameraError, resumeKey, debugMode, dualMode, frontCrop]);
+  }, [cameraError, resumeKey]);
+
 
   const statusText = {
     scanning: "알약을 인식하고 있어요",
