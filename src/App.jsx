@@ -2157,10 +2157,6 @@ function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
           </Section>
         )}
 
-        <div className="pt-2 pb-2">
-          <FeedbackPanel pill={pill} />
-        </div>
-
         <button
           onClick={() => { addToSchedule(pill); setRegistered(true); if (detailSource === "scan") speak("복용 관리에 등록되었습니다"); }}
           className="w-full min-h-[52px] rounded-2xl font-bold text-[17px] mt-2"
