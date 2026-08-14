@@ -116,11 +116,44 @@ async function scoreImprintVariants(worker, canvases, scoreMap) {
 /**
  * OCR imprint with rotation TTA (fast realtime path).
  * thorough=true expands angles/lighting when first pass is weak.
+ * fast=true: 1–2 OCR passes only (demo / live camera).
  */
-export async function extractImprintOcr(cropCanvas, worker, { thorough = false } = {}) {
+export async function extractImprintOcr(cropCanvas, worker, { thorough = false, fast = false } = {}) {
   if (!worker || !cropCanvas) return { mark: "", confidence: 0, all: [] };
 
   const scoreMap = new Map();
+
+  // Live/demo: minimize Tesseract recognizes (biggest latency on phone)
+  if (fast && !thorough) {
+    const base = preprocessForOcr(cropCanvas);
+    await scoreImprintVariants(worker, [adaptiveThresholdCanvas(base)], scoreMap);
+    let rankedFast = Array.from(scoreMap.entries()).sort((a, b) => b[1] - a[1]);
+    if (!rankedFast.length || rankedFast[0][1] < 40) {
+      const flipped = rotateCanvas(cropCanvas, 180);
+      await scoreImprintVariants(
+        worker,
+        [adaptiveThresholdCanvas(preprocessForOcr(flipped))],
+        scoreMap
+      );
+      rankedFast = Array.from(scoreMap.entries()).sort((a, b) => b[1] - a[1]);
+    }
+    if (!rankedFast.length) return { mark: "", confidence: 0, all: [] };
+    const filteredFast = rankedFast.filter(([m]) => isValidImprintMark(m));
+    if (!filteredFast.length) return { mark: "", confidence: 0, all: [] };
+    if (filteredFast[0][1] < 28) {
+      return {
+        mark: "",
+        confidence: 0,
+        all: filteredFast.slice(0, 5).map(([mark, score]) => ({ mark, score })),
+      };
+    }
+    return {
+      mark: filteredFast[0][0],
+      confidence: Math.min(99, filteredFast[0][1]),
+      all: filteredFast.slice(0, 5).map(([mark, score]) => ({ mark, score })),
+    };
+  }
+
   // Realtime: 0° + 180° first (most pills), then 90/270 if needed
   for (const deg of [0, 180]) {
     const rotated = deg === 0 ? cropCanvas : rotateCanvas(cropCanvas, deg);

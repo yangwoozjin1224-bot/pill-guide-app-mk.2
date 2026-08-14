@@ -90,17 +90,19 @@ function toLegacyBest(candidate, matchSource) {
  * @param {Array} [options.candidatePool] - prescription drugs (Phase 1 priority pool)
  */
 export async function runImprintPipeline(sourceCanvas, options = {}) {
+  const fast = options.fast === true;
   const {
     apiFetch,
     candidateFetcher,
     candidatePool = [],
-    maxInstances = 8,
-    topK = 10,
-    useLlm = true,
-    useFallbackLlm = true,
+    maxInstances = fast ? 3 : 8,
+    topK = fast ? 5 : 10,
+    useLlm = !fast,
+    useFallbackLlm = !fast,
     llmFetcher,
     debug = false,
     bagHints = [],
+    thoroughOcr = !fast,
   } = options;
 
   const fetchFn =
@@ -156,7 +158,8 @@ export async function runImprintPipeline(sourceCanvas, options = {}) {
       worker,
       useLlm,
       llmFetcher,
-      thoroughOcr: true,
+      thoroughOcr,
+      fast,
     });
 
     let matchSource = null;
@@ -198,8 +201,8 @@ export async function runImprintPipeline(sourceCanvas, options = {}) {
       }
     }
 
-    // Legacy bag name pull if still empty
-    if (match.empty && bagHints?.length) {
+    // Legacy bag name pull if still empty (skip in fast/live path)
+    if (!fast && match.empty && bagHints?.length) {
       const extra = [];
       for (const name of bagHints.slice(0, 3)) {
         const list = (await fetchFn({ item_name: name })) || [];

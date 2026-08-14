@@ -30,11 +30,7 @@ import {
   getFeedbackCount,
   clearFeedback,
   isFeedbackImageAllowed,
-  shouldRequestEnsemble,
-  getEnsembleConfig,
-  EnsembleBuffer,
-  fuseEnsembleVotes,
-  buildEnsemblePipelineResult,
+  getOcrWorker,
 } from "./vision/pipeline.js";
 import { formatMetricsSummary, getMetrics } from "./vision/metrics.js";
 
@@ -1061,6 +1057,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       });
       streamRef.current = stream;
       await enableContinuousAutofocus(stream);
+      // Warm OCR worker so first recognize isn't blocked on Tesseract init
+      getOcrWorker("eng").catch(() => {});
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         try {
@@ -1081,6 +1079,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         });
         streamRef.current = stream;
         await enableContinuousAutofocus(stream);
+        getOcrWorker("eng").catch(() => {});
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           try {
@@ -1166,7 +1165,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     };
   }, []);
 
-  // Higher-res capture for multi-scale detection (640/960/1280)
+  // Live capture: 640px square — enough for imprint OCR, much faster on phone
   const captureFrame = () => {
     const video = videoRef.current;
     if (!video || !video.videoWidth || !video.videoHeight) return null;
@@ -1176,7 +1175,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     const crop = Math.min(vw, vh) * 0.9;
     const sx = (vw - crop) / 2;
     const sy = (vh - crop) / 2;
-    const out = 960;
+    const out = 640;
 
     if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
     const canvas = canvasRef.current;
@@ -1417,9 +1416,6 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     let emptyTries = 0;
     let totalTries = 0;
     const throttleMsg = createMessageThrottle(400);
-    const ensembleCfg = getEnsembleConfig();
-    const ensembleBuf = new EnsembleBuffer(ensembleCfg);
-    let lastPipelineForEnsemble = null;
 
     const fail = (msg) => {
       stopped = true;
@@ -1428,7 +1424,6 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       setErrorMsg(msg);
       setDetectedMarks([]);
       setEnsembleActive(false);
-      ensembleBuf.reset();
     };
 
     const runSearchOnCanvas = async (canvas) =>
@@ -1439,12 +1434,17 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         candidatePool: getPrescriptionDrugs(),
         frontBack: null,
         debug: debugMode,
-        maxInstances: 6,
-        shareByEmbedding: true,
-        scales: [640, 960],
-        minConfidenceKeep: 0.2,
-        twoPass: true,
-        topK: 10,
+        // Fast live path: fewer pills, single scale, no LLM / heavy OCR TTA
+        fast: true,
+        maxInstances: 3,
+        shareByEmbedding: false,
+        scales: [640],
+        minConfidenceKeep: 0.22,
+        twoPass: false,
+        topK: 5,
+        useLlm: false,
+        useFallbackLlm: false,
+        thoroughOcr: false,
       });
 
     const tick = async () => {
@@ -1496,13 +1496,13 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       }
 
       if (!videoRef.current?.videoWidth) {
-        timerId = setTimeout(tick, 150);
+        timerId = setTimeout(tick, 80);
         return;
       }
 
       const frame = captureFrame();
       if (!frame) {
-        timerId = setTimeout(tick, 150);
+        timerId = setTimeout(tick, 80);
         return;
       }
 
@@ -1513,7 +1513,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         const text = quality.messages[0] || "초점을 맞춰 주세요";
         const shown = throttleMsg(text);
         if (shown) setQualityHint(shown);
-        timerId = setTimeout(tick, 200);
+        timerId = setTimeout(tick, 120);
         return;
       }
 
@@ -1542,10 +1542,15 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
               backCanvas: pipelineResult.results[0].cropCanvas,
             },
             debug: debugMode,
+            fast: true,
             maxInstances: 1,
             shareByEmbedding: false,
-            scales: [640, 960],
-            topK: 10,
+            scales: [640],
+            twoPass: false,
+            topK: 5,
+            useLlm: false,
+            useFallbackLlm: false,
+            thoroughOcr: false,
           });
         }
 
@@ -1587,7 +1592,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           c.getContext("2d").drawImage(dets[0].cropCanvas, 0, 0);
           setFrontCrop(c);
           setCaptureSide("back");
-          timerId = setTimeout(tick, 400);
+          timerId = setTimeout(tick, 200);
           return;
         }
 
@@ -1597,42 +1602,19 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             fail("알약 각인(표기)을 읽지 못했습니다. 글자가 선명하게 보이게 비추거나 직접 입력해주세요.");
             return;
           }
-          timerId = setTimeout(tick, 220);
+          timerId = setTimeout(tick, 100);
           return;
         }
 
         emptyTries = 0;
 
         if (withBest.length) {
-          const needsEnsemble = withBest.some((d) => shouldRequestEnsemble(d, ensembleCfg));
-          if (needsEnsemble) {
-            lastPipelineForEnsemble = pipelineResult;
-            const st = ensembleBuf.addFrame(withBest);
-            setEnsembleActive(true);
-            const hint = `다른 각도·거리에서 한 번 더 비춰 주세요 (${Math.min(st.frameCount, st.need)}/${st.need})`;
-            const shown = throttleMsg(hint);
-            if (shown) setQualityHint(shown);
-            if (!st.ready) {
-              timerId = setTimeout(tick, 320);
-              return;
-            }
-            const fused = fuseEnsembleVotes(ensembleBuf.getFrames());
-            const merged = buildEnsemblePipelineResult(lastPipelineForEnsemble, fused);
-            ensembleBuf.reset();
-            setEnsembleActive(false);
-            const ok = await finalizePipelineResults(merged);
-            if (!ok && !stopped && !cancelledRef.current) {
-              processingRef.current = false;
-              timerId = setTimeout(tick, 260);
-            }
-            return;
-          }
-
+          // Skip multi-frame ensemble in live path — finalize immediately for speed
           setEnsembleActive(false);
           const ok = await finalizePipelineResults(pipelineResult);
           if (!ok && !stopped && !cancelledRef.current) {
             processingRef.current = false;
-            timerId = setTimeout(tick, 260);
+            timerId = setTimeout(tick, 120);
           }
           return;
         }
@@ -1642,16 +1624,16 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           return;
         }
 
-        timerId = setTimeout(tick, 260);
+        timerId = setTimeout(tick, 120);
       } catch (err) {
         console.warn("pipeline tick error", err);
         if (!stopped && !cancelledRef.current && !processingRef.current) {
-          timerId = setTimeout(tick, 280);
+          timerId = setTimeout(tick, 150);
         }
       }
     };
 
-    timerId = setTimeout(tick, 280);
+    timerId = setTimeout(tick, 120);
 
     return () => {
       stopped = true;

@@ -37,12 +37,17 @@ export async function extractPillFeatures(cropCanvas, options = {}) {
     useLlm = true,
     llmFetcher,
     thoroughOcr = true,
+    fast = false,
   } = options;
 
   const [ocr, cv, llm] = await Promise.all([
-    extractImprintFromCrop(cropCanvas, { worker, thorough: thoroughOcr }),
+    extractImprintFromCrop(cropCanvas, {
+      worker,
+      thorough: thoroughOcr && !fast,
+      fast: fast || !thoroughOcr,
+    }),
     Promise.resolve(extractCvFeatures(cropCanvas, { box, area, shapeHint })),
-    useLlm && (isVisionLlmConfigured() || llmFetcher)
+    !fast && useLlm && (isVisionLlmConfigured() || llmFetcher)
       ? observePillFeatures(cropCanvas, { fetcher: llmFetcher })
       : Promise.resolve(null),
   ]);
