@@ -33,6 +33,18 @@ export function isQualityGateEnabled() {
   return true;
 }
 
+/** Reused scratch canvas so live quality ticks do not allocate every frame. */
+let grayScratch = null;
+
+function getGrayScratch(w, h) {
+  if (!grayScratch) grayScratch = document.createElement("canvas");
+  if (grayScratch.width !== w || grayScratch.height !== h) {
+    grayScratch.width = w;
+    grayScratch.height = h;
+  }
+  return grayScratch;
+}
+
 /** Downscale for speed; returns { gray: Float32Array|Uint8Array, w, h, rgba optional } */
 export function canvasToGray(canvas, maxSide = 320) {
   if (!canvas?.getContext) return null;
@@ -42,9 +54,7 @@ export function canvasToGray(canvas, maxSide = 320) {
   const scale = Math.min(1, maxSide / Math.max(sw, sh));
   const w = Math.max(16, Math.round(sw * scale));
   const h = Math.max(16, Math.round(sh * scale));
-  const c = document.createElement("canvas");
-  c.width = w;
-  c.height = h;
+  const c = getGrayScratch(w, h);
   const ctx = c.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(canvas, 0, 0, w, h);
   const { data } = ctx.getImageData(0, 0, w, h);

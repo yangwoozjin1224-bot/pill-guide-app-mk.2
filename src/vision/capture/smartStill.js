@@ -74,12 +74,19 @@ export function shouldCaptureAtPrevious(scoreHistory, qualityOkHistory, { minSco
   return peakScore >= scoreHistory[n - 1];
 }
 
-function cloneCanvas(source) {
+function cloneCanvas(source, maxSide = 0) {
   if (!source?.getContext) return null;
+  let w = source.width;
+  let h = source.height;
+  if (maxSide > 0 && Math.max(w, h) > maxSide) {
+    const scale = maxSide / Math.max(w, h);
+    w = Math.max(32, Math.round(w * scale));
+    h = Math.max(32, Math.round(h * scale));
+  }
   const c = document.createElement("canvas");
-  c.width = source.width;
-  c.height = source.height;
-  c.getContext("2d").drawImage(source, 0, 0);
+  c.width = w;
+  c.height = h;
+  c.getContext("2d").drawImage(source, 0, 0, w, h);
   return c;
 }
 
@@ -140,8 +147,9 @@ export class SmartStillCapture {
       this.okHistory.shift();
     }
 
-    // Keep short frame ring for peak capture (previous frame)
-    const cloned = cloneCanvas(frame);
+    // Keep short frame ring for peak capture (previous frame) — downscaled to cut memory
+    const cloneSide = Math.min(480, frame?.width || 480);
+    const cloned = cloneCanvas(frame, cloneSide);
     this.frameHistory.push(cloned);
     if (this.frameHistory.length > 3) this.frameHistory.shift();
 

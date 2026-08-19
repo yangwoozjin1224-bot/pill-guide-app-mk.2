@@ -105,6 +105,7 @@ export async function runImprintPipeline(sourceCanvas, options = {}) {
     debug = false,
     bagHints = [],
     thoroughOcr = !fast,
+    ocrMaxSide = 280,
   } = options;
 
   const fetchFn =
@@ -162,6 +163,7 @@ export async function runImprintPipeline(sourceCanvas, options = {}) {
       llmFetcher,
       thoroughOcr,
       fast,
+      ocrMaxSide,
     });
 
     // Fast path: if OCR missed imprint but Gemini/LLM is configured, one assist call

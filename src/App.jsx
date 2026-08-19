@@ -8,7 +8,6 @@ import {
   ChevronRight,
   ChevronDown,
   Volume2,
-  Check,
   Plus,
   MoreHorizontal,
   Scan,
@@ -31,6 +30,8 @@ import {
   clearFeedback,
   isFeedbackImageAllowed,
   getOcrWorker,
+  getDeviceProfile,
+  getCameraVideoConstraints,
 } from "./vision/pipeline.js";
 import { formatMetricsSummary, getMetrics } from "./vision/metrics.js";
 import { imprintOverlaps, cleanMark as cleanImprintMark } from "./vision/match/confidence.js";
@@ -1085,12 +1086,15 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     }
     setCameraError("");
     stopCamera();
+    const perf = getDeviceProfile();
+    const videoConstraints = getCameraVideoConstraints(perf);
+    const warmOcr = () => {
+      getOcrWorker("eng").catch(() => {});
+    };
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          ...videoConstraints,
           // Hint continuous AF where supported (Chrome/Android etc.)
           advanced: [{ focusMode: "continuous" }],
         },
@@ -1098,8 +1102,12 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       });
       streamRef.current = stream;
       await enableContinuousAutofocus(stream);
-      // Warm OCR worker so first recognize isn't blocked on Tesseract init
-      getOcrWorker("eng").catch(() => {});
+      // Defer OCR WASM warm on low-end so camera preview paints first
+      if (perf.warmOcrIdle && typeof requestIdleCallback === "function") {
+        requestIdleCallback(warmOcr, { timeout: 1200 });
+      } else {
+        warmOcr();
+      }
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         try {
@@ -1111,16 +1119,16 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       // Retry without advanced focus constraint if device rejects it
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
+          video: videoConstraints,
           audio: false,
         });
         streamRef.current = stream;
         await enableContinuousAutofocus(stream);
-        getOcrWorker("eng").catch(() => {});
+        if (perf.warmOcrIdle && typeof requestIdleCallback === "function") {
+          requestIdleCallback(warmOcr, { timeout: 1200 });
+        } else {
+          warmOcr();
+        }
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           try {
@@ -1139,17 +1147,18 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
   const injectImageAsCamera = async (fileOrBlob) => {
     try {
       const bmp = await createImageBitmap(fileOrBlob);
+      const out = getDeviceProfile().captureSize;
       const source = document.createElement("canvas");
-      source.width = 960;
-      source.height = 960;
+      source.width = out;
+      source.height = out;
       const sctx = source.getContext("2d");
       if (!sctx) throw new Error("canvas 생성 실패");
       sctx.fillStyle = "#F3F4F6";
-      sctx.fillRect(0, 0, 960, 960);
-      const scale = Math.max(960 / bmp.width, 960 / bmp.height);
+      sctx.fillRect(0, 0, out, out);
+      const scale = Math.max(out / bmp.width, out / bmp.height);
       const w = bmp.width * scale;
       const h = bmp.height * scale;
-      sctx.drawImage(bmp, (960 - w) / 2, (960 - h) / 2, w, h);
+      sctx.drawImage(bmp, (out - w) / 2, (out - h) / 2, w, h);
       if (typeof bmp.close === "function") bmp.close();
 
       stopCamera();
@@ -1157,7 +1166,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       galleryCanvasRef.current = source;
       forceGalleryRef.current = true;
 
-      const stream = source.captureStream(8);
+      const stream = source.captureStream(6);
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -1206,7 +1215,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     };
   }, []);
 
-  // Live capture: 640px square — enough for imprint OCR, much faster on phone
+  // Adaptive capture size for low-end phones (see deviceCapability)
   const captureFrame = () => {
     const video = videoRef.current;
     if (!video || !video.videoWidth || !video.videoHeight) return null;
@@ -1216,12 +1225,14 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     const crop = Math.min(vw, vh) * 0.9;
     const sx = (vw - crop) / 2;
     const sy = (vh - crop) / 2;
-    const out = 640;
+    const out = getDeviceProfile().captureSize;
 
     if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
     const canvas = canvasRef.current;
-    canvas.width = out;
-    canvas.height = out;
+    if (canvas.width !== out || canvas.height !== out) {
+      canvas.width = out;
+      canvas.height = out;
+    }
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return null;
     ctx.drawImage(video, sx, sy, crop, crop, 0, 0, out, out);
@@ -1474,6 +1485,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     let emptyTries = 0;
     let totalTries = 0;
     const throttleMsg = createMessageThrottle(400);
+    const perf = getDeviceProfile();
+    let lastQualityOk = true;
 
     const fail = (msg) => {
       stopped = true;
@@ -1494,16 +1507,18 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         debug: debugMode,
         // Fast live path: fewer pills, single scale, light OCR; Gemini only if OCR misses imprint
         fast: true,
-        maxInstances: 3,
+        maxInstances: perf.maxInstances,
         shareByEmbedding: false,
-        scales: [640],
+        scales: [perf.captureSize],
         minConfidenceKeep: 0.22,
         twoPass: false,
-        topK: 5,
+        topK: perf.topK,
         useLlm: false,
         useFallbackLlm: false,
         thoroughOcr: false,
         allowColorShapeOnly: false,
+        ocrMaxSide: perf.ocrCropMax,
+        includeMasks: debugMode && perf.includeMasks,
       });
 
     const tick = async () => {
@@ -1554,24 +1569,30 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
       }
 
       if (!videoRef.current?.videoWidth) {
-        timerId = setTimeout(tick, 80);
+        timerId = setTimeout(tick, perf.tickRetryMs);
         return;
       }
 
       const frame = captureFrame();
       if (!frame) {
-        timerId = setTimeout(tick, 80);
+        timerId = setTimeout(tick, perf.tickRetryMs);
         return;
       }
 
       // Phase 2: live quality (realtime track)
-      const quality = evaluateCaptureQuality(frame, { mode: "pill" });
-      setQualityOk(quality.ok);
+      const quality = evaluateCaptureQuality(frame, {
+        mode: "pill",
+        maxSide: perf.qualityMaxSide,
+      });
+      if (quality.ok !== lastQualityOk) {
+        lastQualityOk = quality.ok;
+        setQualityOk(quality.ok);
+      }
       if (!quality.ok) {
         const text = quality.messages[0] || "초점을 맞춰 주세요";
         const shown = throttleMsg(text);
         if (shown) setQualityHint(shown);
-        timerId = setTimeout(tick, 120);
+        timerId = setTimeout(tick, perf.tickMs);
         return;
       }
 
@@ -1603,12 +1624,13 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             fast: true,
             maxInstances: 1,
             shareByEmbedding: false,
-            scales: [640],
+            scales: [perf.captureSize],
             twoPass: false,
-            topK: 5,
+            topK: perf.topK,
             useLlm: false,
             useFallbackLlm: false,
             thoroughOcr: false,
+            ocrMaxSide: perf.ocrCropMax,
           });
         }
 
@@ -1649,7 +1671,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           c.getContext("2d").drawImage(dets[0].cropCanvas, 0, 0);
           setFrontCrop(c);
           setCaptureSide("back");
-          timerId = setTimeout(tick, 200);
+          timerId = setTimeout(tick, perf.tickFailMs);
           return;
         }
 
@@ -1659,7 +1681,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             fail("알약 각인(표기)을 읽지 못했습니다. 글자가 선명하게 보이게 비추거나 직접 입력해주세요.");
             return;
           }
-          timerId = setTimeout(tick, 100);
+          timerId = setTimeout(tick, perf.tickRetryMs);
           return;
         }
 
@@ -1671,7 +1693,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           const ok = await finalizePipelineResults(pipelineResult);
           if (!ok && !stopped && !cancelledRef.current) {
             processingRef.current = false;
-            timerId = setTimeout(tick, 120);
+            timerId = setTimeout(tick, perf.tickMs);
           }
           return;
         }
@@ -1681,16 +1703,16 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           return;
         }
 
-        timerId = setTimeout(tick, 120);
+        timerId = setTimeout(tick, perf.tickMs);
       } catch (err) {
         console.warn("pipeline tick error", err);
         if (!stopped && !cancelledRef.current && !processingRef.current) {
-          timerId = setTimeout(tick, 150);
+          timerId = setTimeout(tick, perf.tickFailMs);
         }
       }
     };
 
-    timerId = setTimeout(tick, 120);
+    timerId = setTimeout(tick, perf.tickMs);
 
     return () => {
       stopped = true;
@@ -2357,6 +2379,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
   const [qualityOk, setQualityOk] = useState(true);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const bagCanvasRef = useRef(null);
   const bagBusyRef = useRef(false);
   const bagCancelRef = useRef(false);
 
@@ -2379,12 +2402,11 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
     }
     setCameraError("");
     stopCamera();
+    const videoConstraints = getCameraVideoConstraints(getDeviceProfile());
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          ...videoConstraints,
           advanced: [{ focusMode: "continuous" }],
         },
         audio: false,
@@ -2401,11 +2423,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
     } catch {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
+          video: videoConstraints,
           audio: false,
         });
         streamRef.current = stream;
@@ -2427,15 +2445,19 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
   const captureBagFrame = () => {
     const video = videoRef.current;
     if (!video?.videoWidth) return null;
-    const canvas = document.createElement("canvas");
-    // Prefer upright document-ish crop: full frame scaled
-    const maxSide = 1280;
+    const maxSide = getDeviceProfile().docMaxSide;
     const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
-    canvas.width = Math.round(video.videoWidth * scale);
-    canvas.height = Math.round(video.videoHeight * scale);
+    const w = Math.round(video.videoWidth * scale);
+    const h = Math.round(video.videoHeight * scale);
+    if (!bagCanvasRef.current) bagCanvasRef.current = document.createElement("canvas");
+    const canvas = bagCanvasRef.current;
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return null;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(video, 0, 0, w, h);
     return canvas;
   };
 
@@ -2484,6 +2506,7 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
     setStatus("reading");
     setMsg("문서 보정 → OCR → 구조화 추출 중...");
     try {
+      const perf = getDeviceProfile();
       const docResult = await recognizeDocumentPipeline(canvas, {
         searchFn: async (name) => {
           const list = await searchPillList(name);
@@ -2494,6 +2517,9 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
           }));
         },
         debug: false,
+        lite: perf.tier === "low",
+        outWidth: perf.docOutWidth,
+        deskewLite: perf.deskewLite,
       });
 
       // Persist bag context for pill Vision Search cross-check
@@ -2614,27 +2640,35 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
     let lastKey = "";
     let confirmCount = 0;
     const throttleMsg = createMessageThrottle(450);
+    const perf = getDeviceProfile();
+    let lastQualityOk = true;
 
     const tick = async () => {
       if (bagCancelRef.current || bagBusyRef.current) return;
       if (!videoRef.current?.videoWidth) {
-        timerId = setTimeout(tick, 200);
+        timerId = setTimeout(tick, perf.tickFailMs);
         return;
       }
 
       const frame = captureBagFrame();
       if (!frame) {
-        timerId = setTimeout(tick, 200);
+        timerId = setTimeout(tick, perf.tickFailMs);
         return;
       }
 
-      const quality = evaluateCaptureQuality(frame, { mode: "document" });
-      setQualityOk(quality.ok);
+      const quality = evaluateCaptureQuality(frame, {
+        mode: "document",
+        maxSide: perf.qualityMaxSide,
+      });
+      if (quality.ok !== lastQualityOk) {
+        lastQualityOk = quality.ok;
+        setQualityOk(quality.ok);
+      }
       if (!quality.ok) {
         const textMsg = quality.messages[0] || "초점을 맞춰 주세요";
         const shown = throttleMsg(textMsg);
         if (shown) setQualityHint(shown);
-        timerId = setTimeout(tick, 280);
+        timerId = setTimeout(tick, Math.max(280, perf.tickMs));
         return;
       }
 
@@ -2653,6 +2687,9 @@ function ManagementScreen({ setScreen, schedule, addToSchedule, onCameraModeChan
             }));
           },
           debug: false,
+          lite: perf.tier === "low",
+          outWidth: perf.docOutWidth,
+          deskewLite: perf.deskewLite,
         });
         if (bagCancelRef.current) return;
 

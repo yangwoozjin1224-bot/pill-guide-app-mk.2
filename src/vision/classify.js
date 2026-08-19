@@ -113,14 +113,38 @@ async function scoreImprintVariants(worker, canvases, scoreMap) {
   }
 }
 
+/** Downscale crop before Tesseract — OCR does not need full 640px on phones. */
+export function limitOcrCanvas(canvas, maxSide = 280) {
+  if (!canvas?.width || !canvas?.height) return canvas;
+  const side = Math.max(canvas.width, canvas.height);
+  if (side <= maxSide) return canvas;
+  const scale = maxSide / side;
+  const w = Math.max(32, Math.round(canvas.width * scale));
+  const h = Math.max(32, Math.round(canvas.height * scale));
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext("2d");
+  if (!ctx) return canvas;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(canvas, 0, 0, w, h);
+  return out;
+}
+
 /**
  * OCR imprint with rotation TTA (fast realtime path).
  * thorough=true expands angles/lighting when first pass is weak.
  * fast=true: 1–2 OCR passes only (demo / live camera).
  */
-export async function extractImprintOcr(cropCanvas, worker, { thorough = false, fast = false } = {}) {
+export async function extractImprintOcr(
+  cropCanvas,
+  worker,
+  { thorough = false, fast = false, maxSide = 280 } = {}
+) {
   if (!worker || !cropCanvas) return { mark: "", confidence: 0, all: [] };
 
+  cropCanvas = limitOcrCanvas(cropCanvas, maxSide);
   const scoreMap = new Map();
 
   // Live/demo: minimize Tesseract recognizes (biggest latency on phone)

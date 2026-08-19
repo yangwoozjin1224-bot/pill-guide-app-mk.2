@@ -6,3 +6,19 @@ html, body, #root {
   height: 100%;
   margin: 0;
 }
+
+/* Cut paint/layout work on low-end phones */
+img {
+  content-visibility: auto;
+  contain-intrinsic-size: 56px 56px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

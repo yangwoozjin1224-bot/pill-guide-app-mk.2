@@ -38,6 +38,7 @@ export async function extractPillFeatures(cropCanvas, options = {}) {
     llmFetcher,
     thoroughOcr = true,
     fast = false,
+    ocrMaxSide = 280,
   } = options;
 
   const [ocr, cv, llm] = await Promise.all([
@@ -45,6 +46,7 @@ export async function extractPillFeatures(cropCanvas, options = {}) {
       worker,
       thorough: thoroughOcr && !fast,
       fast: fast || !thoroughOcr,
+      maxSide: ocrMaxSide,
     }),
     Promise.resolve(extractCvFeatures(cropCanvas, { box, area, shapeHint })),
     !fast && useLlm && (isVisionLlmConfigured() || llmFetcher)

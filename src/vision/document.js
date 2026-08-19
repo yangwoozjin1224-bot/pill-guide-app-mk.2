@@ -62,12 +62,12 @@ export function detectDocumentQuad(canvas) {
  * Perspective-ish correction via axis-aligned crop + resize to document aspect.
  * (Full homography needs 4 corners; this robustly handles most bag/prescription photos.)
  */
-export function perspectiveCorrect(canvas, quad) {
-  const outW = 1000;
+export function perspectiveCorrect(canvas, quad, { outWidth = 1000 } = {}) {
+  const outW = Math.max(480, Math.round(outWidth));
   const outH = Math.round((quad.h / Math.max(quad.w, 1)) * outW);
   const out = document.createElement("canvas");
   out.width = outW;
-  out.height = Math.max(400, outH);
+  out.height = Math.max(320, outH);
   out.getContext("2d").drawImage(canvas, quad.x, quad.y, quad.w, quad.h, 0, 0, out.width, out.height);
   return out;
 }
@@ -82,7 +82,9 @@ export function enhanceDocument(canvas) {
 }
 
 /** Deskew estimate using horizontal projection variance heuristic */
-export function deskew(canvas) {
+export function deskew(canvas, { lite = false } = {}) {
+  // Lite: skip multi-angle search on low-end (biggest doc CPU cost after OCR)
+  if (lite) return canvas;
   // Try small angles and pick max row-variance (text lines align)
   const angles = [-4, -2, 0, 2, 4];
   let best = canvas;
@@ -119,11 +121,16 @@ export function deskew(canvas) {
   return best;
 }
 
-export function prepareDocumentForOcr(sourceCanvas) {
+export function prepareDocumentForOcr(sourceCanvas, options = {}) {
+  const { outWidth = 1000, deskewLite = false, liteEnhance = false } = options;
   const quad = detectDocumentQuad(sourceCanvas);
-  let doc = perspectiveCorrect(sourceCanvas, quad);
-  doc = enhanceDocument(doc);
-  doc = deskew(doc);
+  let doc = perspectiveCorrect(sourceCanvas, quad, { outWidth });
+  if (liteEnhance) {
+    doc = autoContrast(cloneCanvas(doc), 0.8);
+  } else {
+    doc = enhanceDocument(doc);
+  }
+  doc = deskew(doc, { lite: deskewLite });
   // Why adaptive threshold after deskew: Hangul strokes need local contrast, not global binary
   const binary = adaptiveThresholdCanvas(doc);
   return {

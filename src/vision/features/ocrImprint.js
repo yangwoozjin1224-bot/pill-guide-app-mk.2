@@ -21,6 +21,7 @@ export async function extractImprintFromCrop(cropCanvas, options = {}) {
   const ocr = await extractImprintOcr(cropCanvas, worker, {
     thorough: options.thorough === true,
     fast: options.fast === true || options.thorough === false,
+    maxSide: options.maxSide || 280,
   });
 
   const mark = isValidImprintMark(ocr.mark) ? ocr.mark : "";

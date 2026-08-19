@@ -334,7 +334,7 @@ function maskToOverlay(labels, id, w, h) {
   return c;
 }
 
-function compsToBoxes(comps, labels, sw, sh, sx, sy, frameArea) {
+function compsToBoxes(comps, labels, sw, sh, sx, sy, frameArea, { includeMasks = false } = {}) {
   const minArea = frameArea * 0.0018;
   const maxArea = frameArea * 0.42;
   const out = [];
@@ -366,9 +366,10 @@ function compsToBoxes(comps, labels, sw, sh, sx, sy, frameArea) {
       shape,
       area: comp.area * sx * sy,
       maskLabel: comp.id,
-      maskCanvas: labels
-        ? maskToOverlay(labels, labels[comp.pixels[0]] || comp.id, sw, sh)
-        : null,
+      maskCanvas:
+        includeMasks && labels
+          ? maskToOverlay(labels, labels[comp.pixels[0]] || comp.id, sw, sh)
+          : null,
     });
   }
   return out;
@@ -409,7 +410,9 @@ export function detectAtScaleOpenCv(preprocessed, scaleSide, originW, originH, o
 
   const sx = originW / sw;
   const sy = originH / sh;
-  return compsToBoxes(splitComps, labels, sw, sh, sx, sy, frameArea).map((b) => ({
+  return compsToBoxes(splitComps, labels, sw, sh, sx, sy, frameArea, {
+    includeMasks: options.includeMasks === true,
+  }).map((b) => ({
     ...b,
     scale: scaleSide,
   }));
@@ -422,6 +425,7 @@ export async function detectOpenCvClassical(source, options = {}) {
     marginRatio = 0.18,
     minConfidenceKeep = 0.18,
     twoPass = true,
+    includeMasks = false,
   } = options;
 
   const pre = preprocessForDetection(source, Math.max(...scales));
@@ -430,7 +434,7 @@ export async function detectOpenCvClassical(source, options = {}) {
   let candidates = [];
   for (const side of scales) {
     candidates = candidates.concat(
-      detectAtScaleOpenCv(pre, side, pre.width, pre.height, { sensitivity })
+      detectAtScaleOpenCv(pre, side, pre.width, pre.height, { sensitivity, includeMasks })
     );
   }
 
@@ -452,6 +456,7 @@ export async function detectOpenCvClassical(source, options = {}) {
       roi.getContext("2d").drawImage(pre, x, y, ww, hh, 0, 0, roi.width, roi.height);
       const local = detectAtScaleOpenCv(roi, 640, roi.width, roi.height, {
         sensitivity: sensitivity * 1.1,
+        includeMasks,
       }).map((d) => ({
         ...d,
         x: d.x + x,

@@ -31,7 +31,11 @@ function dataGoProxyPlugin(apiKey) {
           if (!apiKey || apiKey === "YOUR_SERVICE_KEY") {
             res.statusCode = 500;
             res.setHeader("Content-Type", "application/json");
-            res.end(JSON.stringify({ error: "VITE_API_KEY / DATA_GO_API_KEY is not configured in .env" }));
+            res.end(
+              JSON.stringify({
+                error: "VITE_API_KEY / DATA_GO_API_KEY is not configured in .env",
+              })
+            );
             return;
           }
 
@@ -62,5 +66,29 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react(), dataGoProxyPlugin(apiKey)],
+    build: {
+      target: "es2018",
+      cssCodeSplit: true,
+      sourcemap: false,
+      chunkSizeWarningLimit: 900,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes("node_modules/tesseract.js") || id.includes("tesseract.js-core")) {
+              return "ocr";
+            }
+            if (id.includes("node_modules/lucide-react")) {
+              return "icons";
+            }
+            if (id.includes("node_modules/react-dom") || id.includes("node_modules/react/")) {
+              return "react-vendor";
+            }
+          },
+        },
+      },
+    },
+    optimizeDeps: {
+      include: ["tesseract.js"],
+    },
   };
 });
