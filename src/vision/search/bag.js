@@ -62,8 +62,12 @@ export function structureBagText(ocrText) {
   };
 }
 
-export async function recognizeMedicineBag(sourceCanvas, { searchFn, debug = false } = {}) {
-  const prepared = prepareDocumentForOcr(sourceCanvas);
+export async function recognizeMedicineBag(sourceCanvas, { searchFn, debug = false, lite = false, outWidth, deskewLite } = {}) {
+  const prepared = prepareDocumentForOcr(sourceCanvas, {
+    outWidth: outWidth ?? (lite ? 720 : 1000),
+    deskewLite: deskewLite ?? lite,
+    liteEnhance: lite,
+  });
   const { text, confidence } = await recognizeCanvas(prepared.ocrCanvas || prepared.binaryCanvas, {
     langs: "kor+eng",
     psm: 6,
@@ -75,7 +79,7 @@ export async function recognizeMedicineBag(sourceCanvas, { searchFn, debug = fal
   const seen = new Set();
 
   if (typeof searchFn === "function") {
-    for (const name of structured.drugNames.slice(0, 10)) {
+    for (const name of structured.drugNames.slice(0, lite ? 6 : 10)) {
       try {
         const list = await searchFn(name);
         if (!Array.isArray(list) || !list.length) continue;

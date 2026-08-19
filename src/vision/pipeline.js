@@ -2,6 +2,13 @@
  * Pipeline façade → imprint-first DB matching (+ legacy Vision Search).
  */
 export {
+  getDeviceProfile,
+  detectDeviceTier,
+  getCameraVideoConstraints,
+  resetDeviceProfileCache,
+} from "./deviceCapability.js";
+
+export {
   runVisionSearch,
   runVisionSearch as recognizePillsPipeline,
   getVisionSearchConfig,
