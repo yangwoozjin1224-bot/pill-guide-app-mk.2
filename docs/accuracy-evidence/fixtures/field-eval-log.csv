@@ -1,0 +1,11 @@
+id,pill_name,gt_item_seq_or_name,capture_mode,lighting,blur_ok,imprint_visible,predicted_name,predicted_item_seq,top1_correct,notes,evaluator,date
+1,타이레놀정500밀리그램,,camera,indoor_bright,yes,yes,,,,,
+2,게보린정,,camera,indoor_bright,yes,yes,,,,,
+3,아스피린프로텍트정,,camera,indoor_bright,yes,yes,,,,,
+4,낙센정,,camera,indoor_bright,yes,yes,,,,,
+5,지르텍정,,camera,indoor_dim,yes,yes,,,,,
+6,클라리틴정,,camera,indoor_bright,yes,yes,,,,,
+7,부루펜정,,camera,indoor_bright,yes,yes,,,,,
+8,애드빌정,,camera,indoor_bright,yes,yes,,,,,
+9,훼스탈플러스정,,camera,indoor_bright,yes,yes,,,,,
+10,판콜에이,,camera,indoor_bright,yes,partial,,,,,
