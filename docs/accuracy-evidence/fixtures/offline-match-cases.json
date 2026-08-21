@@ -1,0 +1,280 @@
+{
+  "title": "Offline imprint→DB matching evaluation fixtures",
+  "version": "1.0.0",
+  "createdAt": "2026-08-21",
+  "scope": "matching_layer_only",
+  "scopeNote": "카메라 OCR/검출이 아닌, 추출된 각인·색·모양이 주어졌을 때 식약처형 후보 중에서 올바른 약을 고르는 계층만 측정합니다.",
+  "catalog": [
+    {
+      "ITEM_SEQ": "20120001",
+      "ITEM_NAME": "타이레놀정500밀리그램",
+      "PRINT_FRONT": "TYLENOL",
+      "PRINT_BACK": "500",
+      "COLOR_CLASS1": "하양",
+      "DRUG_SHAPE": "원형"
+    },
+    {
+      "ITEM_SEQ": "20120002",
+      "ITEM_NAME": "게보린정",
+      "PRINT_FRONT": "GEVORIN",
+      "PRINT_BACK": "",
+      "COLOR_CLASS1": "하양",
+      "DRUG_SHAPE": "원형"
+    },
+    {
+      "ITEM_SEQ": "20120003",
+      "ITEM_NAME": "아스피린프로텍트정100밀리그램",
+      "PRINT_FRONT": "BAYER",
+      "PRINT_BACK": "100",
+      "COLOR_CLASS1": "하양",
+      "DRUG_SHAPE": "원형"
+    },
+    {
+      "ITEM_SEQ": "20120004",
+      "ITEM_NAME": "낙센정500밀리그램",
+      "PRINT_FRONT": "NAPROXEN",
+      "PRINT_BACK": "500",
+      "COLOR_CLASS1": "하양",
+      "DRUG_SHAPE": "타원형"
+    },
+    {
+      "ITEM_SEQ": "20120005",
+      "ITEM_NAME": "지르텍정",
+      "PRINT_FRONT": "Zyrtec",
+      "PRINT_BACK": "10",
+      "COLOR_CLASS1": "하양",
+      "DRUG_SHAPE": "장방형"
+    },
+    {
+      "ITEM_SEQ": "20120006",
+      "ITEM_NAME": "훼스탈플러스정",
+      "PRINT_FRONT": "FESTAL",
+      "PRINT_BACK": "PLUS",
+      "COLOR_CLASS1": "하양",
+      "DRUG_SHAPE": "원형"
+    },
+    {
+      "ITEM_SEQ": "20120007",
+      "ITEM_NAME": "가스모틴정5밀리그램",
+      "PRINT_FRONT": "GAS",
+      "PRINT_BACK": "MOTIN",
+      "COLOR_CLASS1": "하양",
+      "DRUG_SHAPE": "원형"
+    },
+    {
+      "ITEM_SEQ": "20120008",
+      "ITEM_NAME": "베아제정",
+      "PRINT_FRONT": "BEAZYME",
+      "PRINT_BACK": "",
+      "COLOR_CLASS1": "연두",
+      "DRUG_SHAPE": "원형"
+    },
+    {
+      "ITEM_SEQ": "20120009",
+      "ITEM_NAME": "판콜에이연질캡슐",
+      "PRINT_FRONT": "PANCOL",
+      "PRINT_BACK": "A",
+      "COLOR_CLASS1": "노랑",
+      "DRUG_SHAPE": "캡슐형"
+    },
+    {
+      "ITEM_SEQ": "20120010",
+      "ITEM_NAME": "클라리틴정",
+      "PRINT_FRONT": "CLARITIN",
+      "PRINT_BACK": "10",
+      "COLOR_CLASS1": "하양",
+      "DRUG_SHAPE": "타원형"
+    },
+    {
+      "ITEM_SEQ": "20120011",
+      "ITEM_NAME": "부루펜정400밀리그램",
+      "PRINT_FRONT": "BRUFEN",
+      "PRINT_BACK": "400",
+      "COLOR_CLASS1": "분홍",
+      "DRUG_SHAPE": "원형"
+    },
+    {
+      "ITEM_SEQ": "20120012",
+      "ITEM_NAME": "애드빌정",
+      "PRINT_FRONT": "ADVIL",
+      "PRINT_BACK": "",
+      "COLOR_CLASS1": "주황",
+      "DRUG_SHAPE": "타원형"
+    }
+  ],
+  "cases": [
+    {
+      "id": "E01",
+      "type": "exact",
+      "features": { "imprintFront": "TYLENOL", "color": "하양", "shape": "원형" },
+      "gtItemSeq": "20120001",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "E02",
+      "type": "exact",
+      "features": { "imprintFront": "GEVORIN", "color": "하양", "shape": "원형" },
+      "gtItemSeq": "20120002",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "E03",
+      "type": "exact",
+      "features": { "imprintFront": "BAYER", "color": "하양", "shape": "원형" },
+      "gtItemSeq": "20120003",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "E04",
+      "type": "exact",
+      "features": { "imprintFront": "NAPROXEN", "color": "하양", "shape": "타원형" },
+      "gtItemSeq": "20120004",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "E05",
+      "type": "exact",
+      "features": { "imprintFront": "ZYRTEC", "color": "하양", "shape": "장방형" },
+      "gtItemSeq": "20120005",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "E06",
+      "type": "exact",
+      "features": { "imprintFront": "FESTAL", "color": "하양", "shape": "원형" },
+      "gtItemSeq": "20120006",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "E07",
+      "type": "exact",
+      "features": { "imprintFront": "CLARITIN", "color": "하양", "shape": "타원형" },
+      "gtItemSeq": "20120010",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "E08",
+      "type": "exact",
+      "features": { "imprintFront": "BRUFEN", "color": "분홍", "shape": "원형" },
+      "gtItemSeq": "20120011",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "E09",
+      "type": "exact",
+      "features": { "imprintFront": "ADVIL", "color": "주황", "shape": "타원형" },
+      "gtItemSeq": "20120012",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "E10",
+      "type": "exact",
+      "features": { "imprintFront": "BEAZYME", "color": "연두", "shape": "원형" },
+      "gtItemSeq": "20120008",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "P01",
+      "type": "partial",
+      "features": { "imprintFront": "TYLEN", "color": "하양", "shape": "원형", "markCandidates": ["TYLEN"] },
+      "gtItemSeq": "20120001",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "P02",
+      "type": "partial",
+      "features": { "imprintFront": "GEVOR", "color": "하양", "shape": "원형" },
+      "gtItemSeq": "20120002",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "P03",
+      "type": "partial",
+      "features": { "imprintFront": "CLARI", "color": "하양", "shape": "타원형" },
+      "gtItemSeq": "20120010",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "P04",
+      "type": "partial",
+      "features": { "imprintFront": "NAPROX", "color": "하양", "shape": "타원형" },
+      "gtItemSeq": "20120004",
+      "expectTop1": true,
+      "expectReject": false
+    },
+    {
+      "id": "R01",
+      "type": "reject",
+      "features": { "imprintFront": "ZZZZ99", "color": "하양", "shape": "원형" },
+      "gtItemSeq": null,
+      "expectTop1": false,
+      "expectReject": true,
+      "note": "존재하지 않는 각인 → exact/partial Top-1 확정 금지"
+    },
+    {
+      "id": "R02",
+      "type": "reject",
+      "features": { "imprintFront": "XXXXXX", "color": "검정", "shape": "캡슐형" },
+      "gtItemSeq": null,
+      "expectTop1": false,
+      "expectReject": true
+    },
+    {
+      "id": "R03",
+      "type": "reject_color_only",
+      "features": { "imprintFront": "", "color": "하양", "shape": "원형" },
+      "gtItemSeq": null,
+      "expectTop1": false,
+      "expectReject": true,
+      "note": "각인 없는 색·모양만으로는 자동 확정하지 않음 (color_shape/weak)"
+    },
+    {
+      "id": "R04",
+      "type": "reject_color_only",
+      "features": { "imprintFront": "", "color": "분홍", "shape": "원형" },
+      "gtItemSeq": null,
+      "expectTop1": false,
+      "expectReject": true
+    },
+    {
+      "id": "C01",
+      "type": "candidate_mark",
+      "features": {
+        "imprintFront": "TYLEN0L",
+        "color": "하양",
+        "shape": "원형",
+        "markCandidates": ["TYLENOL", "TYLEN0L"]
+      },
+      "gtItemSeq": "20120001",
+      "expectTop1": true,
+      "expectReject": false,
+      "note": "OCR 오인식 후보에 정답이 포함된 경우"
+    },
+    {
+      "id": "C02",
+      "type": "candidate_mark",
+      "features": {
+        "imprintFront": "ADV1L",
+        "color": "주황",
+        "shape": "타원형",
+        "markCandidates": ["ADVIL", "ADV1L"]
+      },
+      "gtItemSeq": "20120012",
+      "expectTop1": true,
+      "expectReject": false
+    }
+  ]
+}

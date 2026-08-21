@@ -1,0 +1,273 @@
+{
+  "title": "Pill Guide — Accuracy Evidence Report",
+  "generatedAt": "2026-08-21T03:46:19.957Z",
+  "app": "pill-guide-app-mk.2",
+  "oneLiner": "저시력·고령자를 위한 AI 알약 인식 앱 — 카메라로 각인을 읽고 식약처 DB와 매칭한다.",
+  "scope": {
+    "measured": "offline_matching_layer",
+    "measuredKo": "각인·색·모양이 이미 추출되었다고 가정한 뒤, DB 후보 순위/수락·거절 정확도",
+    "notMeasured": [
+      "실기 카메라 프레임 E2E Top-1",
+      "조명/반사/손떨림 조건별 OCR 성공률",
+      "다중 알약 검출 IoU"
+    ],
+    "notMeasuredKo": "카메라 실기 E2E는 별도 필드 평가 로그(field-eval-log.csv)로 수집"
+  },
+  "metrics": {
+    "matchingTop1AccuracyPct": 100,
+    "matchingTop1": {
+      "correct": 16,
+      "total": 16
+    },
+    "matchingRecallAt5Pct": 100,
+    "matchingRecallAt5": {
+      "correct": 16,
+      "total": 16
+    },
+    "falseAcceptRejectRatePct": 100,
+    "falseAcceptReject": {
+      "correct": 4,
+      "total": 4
+    },
+    "catalogSize": 12,
+    "caseCount": 20
+  },
+  "unitTests": {
+    "passed": true,
+    "exitCode": 0,
+    "testCount": 37,
+    "summaryLine": "# tests 37 | # suites 22 | # pass 37 | # fail 0 | # cancelled 0 | # skipped 0 | # todo 0 | # duration_ms 123.482908"
+  },
+  "definition": {
+    "top1": "rankCandidates 1위가 exact/partial(conf≥0.5)이고 ITEM_SEQ가 정답과 일치",
+    "reject": "잘못된/빈 각인에서 exact·partial 자동 확정이 나오지 않음 (오인식 억제)",
+    "recallAt5": "정답 ITEM_SEQ가 상위 5후보에 포함"
+  },
+  "cases": [
+    {
+      "id": "E01",
+      "type": "exact",
+      "ok": true,
+      "detail": "TOP1 타이레놀정500밀리그램 (exact, conf=0.91)",
+      "topTier": "exact",
+      "topName": "타이레놀정500밀리그램",
+      "topConfidence": 0.91,
+      "gtItemSeq": "20120001",
+      "note": ""
+    },
+    {
+      "id": "E02",
+      "type": "exact",
+      "ok": true,
+      "detail": "TOP1 게보린정 (exact, conf=0.91)",
+      "topTier": "exact",
+      "topName": "게보린정",
+      "topConfidence": 0.91,
+      "gtItemSeq": "20120002",
+      "note": ""
+    },
+    {
+      "id": "E03",
+      "type": "exact",
+      "ok": true,
+      "detail": "TOP1 아스피린프로텍트정100밀리그램 (exact, conf=0.91)",
+      "topTier": "exact",
+      "topName": "아스피린프로텍트정100밀리그램",
+      "topConfidence": 0.91,
+      "gtItemSeq": "20120003",
+      "note": ""
+    },
+    {
+      "id": "E04",
+      "type": "exact",
+      "ok": true,
+      "detail": "TOP1 낙센정500밀리그램 (exact, conf=0.91)",
+      "topTier": "exact",
+      "topName": "낙센정500밀리그램",
+      "topConfidence": 0.91,
+      "gtItemSeq": "20120004",
+      "note": ""
+    },
+    {
+      "id": "E05",
+      "type": "exact",
+      "ok": true,
+      "detail": "TOP1 지르텍정 (exact, conf=0.91)",
+      "topTier": "exact",
+      "topName": "지르텍정",
+      "topConfidence": 0.91,
+      "gtItemSeq": "20120005",
+      "note": ""
+    },
+    {
+      "id": "E06",
+      "type": "exact",
+      "ok": true,
+      "detail": "TOP1 훼스탈플러스정 (exact, conf=0.91)",
+      "topTier": "exact",
+      "topName": "훼스탈플러스정",
+      "topConfidence": 0.91,
+      "gtItemSeq": "20120006",
+      "note": ""
+    },
+    {
+      "id": "E07",
+      "type": "exact",
+      "ok": true,
+      "detail": "TOP1 클라리틴정 (exact, conf=0.91)",
+      "topTier": "exact",
+      "topName": "클라리틴정",
+      "topConfidence": 0.91,
+      "gtItemSeq": "20120010",
+      "note": ""
+    },
+    {
+      "id": "E08",
+      "type": "exact",
+      "ok": true,
+      "detail": "TOP1 부루펜정400밀리그램 (exact, conf=0.91)",
+      "topTier": "exact",
+      "topName": "부루펜정400밀리그램",
+      "topConfidence": 0.91,
+      "gtItemSeq": "20120011",
+      "note": ""
+    },
+    {
+      "id": "E09",
+      "type": "exact",
+      "ok": true,
+      "detail": "TOP1 애드빌정 (exact, conf=0.91)",
+      "topTier": "exact",
+      "topName": "애드빌정",
+      "topConfidence": 0.91,
+      "gtItemSeq": "20120012",
+      "note": ""
+    },
+    {
+      "id": "E10",
+      "type": "exact",
+      "ok": true,
+      "detail": "TOP1 베아제정 (exact, conf=0.91)",
+      "topTier": "exact",
+      "topName": "베아제정",
+      "topConfidence": 0.91,
+      "gtItemSeq": "20120008",
+      "note": ""
+    },
+    {
+      "id": "P01",
+      "type": "partial",
+      "ok": true,
+      "detail": "TOP1 타이레놀정500밀리그램 (partial, conf=0.83)",
+      "topTier": "partial",
+      "topName": "타이레놀정500밀리그램",
+      "topConfidence": 0.832,
+      "gtItemSeq": "20120001",
+      "note": ""
+    },
+    {
+      "id": "P02",
+      "type": "partial",
+      "ok": true,
+      "detail": "TOP1 게보린정 (partial, conf=0.83)",
+      "topTier": "partial",
+      "topName": "게보린정",
+      "topConfidence": 0.832,
+      "gtItemSeq": "20120002",
+      "note": ""
+    },
+    {
+      "id": "P03",
+      "type": "partial",
+      "ok": true,
+      "detail": "TOP1 클라리틴정 (partial, conf=0.82)",
+      "topTier": "partial",
+      "topName": "클라리틴정",
+      "topConfidence": 0.82,
+      "gtItemSeq": "20120010",
+      "note": ""
+    },
+    {
+      "id": "P04",
+      "type": "partial",
+      "ok": true,
+      "detail": "TOP1 낙센정500밀리그램 (partial, conf=0.84)",
+      "topTier": "partial",
+      "topName": "낙센정500밀리그램",
+      "topConfidence": 0.835,
+      "gtItemSeq": "20120004",
+      "note": ""
+    },
+    {
+      "id": "R01",
+      "type": "reject",
+      "ok": true,
+      "detail": "rejected (top=color_shape:타이레놀정500밀리그램)",
+      "topTier": "color_shape",
+      "topName": "타이레놀정500밀리그램",
+      "topConfidence": 0.48,
+      "gtItemSeq": null,
+      "note": "존재하지 않는 각인 → exact/partial Top-1 확정 금지"
+    },
+    {
+      "id": "R02",
+      "type": "reject",
+      "ok": true,
+      "detail": "rejected (top=weak:판콜에이연질캡슐)",
+      "topTier": "weak",
+      "topName": "판콜에이연질캡슐",
+      "topConfidence": 0.268,
+      "gtItemSeq": null,
+      "note": ""
+    },
+    {
+      "id": "R03",
+      "type": "reject_color_only",
+      "ok": true,
+      "detail": "rejected (top=color_shape:타이레놀정500밀리그램)",
+      "topTier": "color_shape",
+      "topName": "타이레놀정500밀리그램",
+      "topConfidence": 0.48,
+      "gtItemSeq": null,
+      "note": "각인 없는 색·모양만으로는 자동 확정하지 않음 (color_shape/weak)"
+    },
+    {
+      "id": "R04",
+      "type": "reject_color_only",
+      "ok": true,
+      "detail": "rejected (top=color_shape:부루펜정400밀리그램)",
+      "topTier": "color_shape",
+      "topName": "부루펜정400밀리그램",
+      "topConfidence": 0.48,
+      "gtItemSeq": null,
+      "note": ""
+    },
+    {
+      "id": "C01",
+      "type": "candidate_mark",
+      "ok": true,
+      "detail": "TOP1 타이레놀정500밀리그램 (exact, conf=0.91)",
+      "topTier": "exact",
+      "topName": "타이레놀정500밀리그램",
+      "topConfidence": 0.91,
+      "gtItemSeq": "20120001",
+      "note": "OCR 오인식 후보에 정답이 포함된 경우"
+    },
+    {
+      "id": "C02",
+      "type": "candidate_mark",
+      "ok": true,
+      "detail": "TOP1 애드빌정 (exact, conf=0.91)",
+      "topTier": "exact",
+      "topName": "애드빌정",
+      "topConfidence": 0.91,
+      "gtItemSeq": "20120012",
+      "note": ""
+    }
+  ],
+  "reproducibility": {
+    "command": "npm run eval:accuracy",
+    "fixture": "docs/accuracy-evidence/fixtures/offline-match-cases.json",
+    "code": "src/vision/match/confidence.js → rankCandidates"
+  }
+}
