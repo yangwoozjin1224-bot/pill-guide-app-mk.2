@@ -1,0 +1,41 @@
+========================================
+  알약 앱 - 바로 실행하는 방법
+========================================
+
+1) ZIP 압축을 풀어 폴더로 들어갑니다.
+
+2) 터미널(명령 프롬프트)을 열고 그 폴더로 이동합니다.
+   예) cd 폴더이름
+
+3) 처음 한 번만 설치:
+   npm install
+
+4) 앱 실행:
+   npm run dev
+
+5) 브라우저에서 주소 열기:
+   http://localhost:5173
+
+----------------------------------------
+추가 테스트 (선택)
+----------------------------------------
+검색 폼 자동 테스트:
+  npm run stress-test
+
+사진 인식 자동 테스트:
+  npm run stress-test:scan
+
+실사 사진으로 테스트하려면
+  test-fixtures/scan/ 폴더에 png/jpg 사진을 넣고
+  npm run stress-test:scan
+  을 다시 실행하세요.
+
+----------------------------------------
+참고
+----------------------------------------
+- .env / .env.production 에 API 키가 들어 있습니다.
+- 앱이 안 켜지면 Node.js 설치 여부를 확인하세요. (https://nodejs.org)
+- GitHub 주소:
+  https://github.com/yangwoozjin1224-bot/pill-guide-app-mk.2
+  브랜치: cursor/playwright-stress-test-4f53
+  PR: https://github.com/yangwoozjin1224-bot/pill-guide-app-mk.2/pull/6
