@@ -1459,7 +1459,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     setResumeKey((k) => k + 1);
   };
 
-  // DEMO VIDEO: ~6초 후 타이레놀정500밀리그램 고정 결과 (촬영용)
+  // DEMO VIDEO: ~6초 후 타이레놀 500미리 정(아세트아미노펜) 고정 결과 (촬영용)
   useEffect(() => {
     if (cameraError) return;
 
@@ -1496,7 +1496,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         const fallback = {
           id: "199303131",
           itemSeq: "199303131",
-          name: "타이레놀정500밀리그램",
+          name: "타이레놀 500미리 정 아세트아미노펜",
           tag: "해열진통소염제",
           // TTS·카드용: 언제 먹는지 (짧게)
           time: "두통·발열 있을 때, 4~6시간마다 1회",
@@ -1537,11 +1537,11 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
             schedule
           );
           if (detail?.itemSeq || detail?.name) {
-            // Keep demo dosage/caution copy for filming; merge image/name from API when present
+            // Keep demo name/dosage/caution for filming; merge image from API when present
             pill = {
               ...fallback,
               ...detail,
-              name: detail.name || fallback.name,
+              name: fallback.name,
               imageUrl: detail.imageUrl || fallback.imageUrl,
               timing: fallback.timing,
               caution: fallback.caution,
