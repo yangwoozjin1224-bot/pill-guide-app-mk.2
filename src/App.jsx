@@ -1459,7 +1459,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     setResumeKey((k) => k + 1);
   };
 
-  // DEMO VIDEO: ~6초 후 아발탄정10/160밀리그램 고정 결과 (촬영용)
+  // DEMO VIDEO: ~6초 후 타이레놀정500밀리그램 고정 결과 (촬영용)
   useEffect(() => {
     if (cameraError) return;
 
@@ -1494,49 +1494,46 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         processingRef.current = true;
         setStatus("loading");
         const fallback = {
-          id: "201402898",
-          itemSeq: "201402898",
-          name: "아발탄정10/160밀리그램",
-          tag: "의약품",
-          time: "1일 1회 1정",
+          id: "199303131",
+          itemSeq: "199303131",
+          name: "타이레놀정500밀리그램",
+          tag: "해열진통소염제",
+          // TTS·카드용: 언제 먹는지 (짧게)
+          time: "두통·발열 있을 때, 4~6시간마다 1회",
           timing: [
             "기본 복용 방법",
             "",
-            "용량 및 횟수: 보통 1일 1회 1정을 복용합니다.",
+            "성인: 1회 1~2정, 1일 3~4회 (4~6시간 간격)",
             "",
-            "복용 시간: 식사 여부(식전/식후)와 관계없이 매일 같은 시간에 물과 함께 삼켜서 복용하는 것이 좋습니다.",
+            "언제 먹나요: 두통, 치통, 생리통, 감기 발열 등 증상이 있을 때 복용합니다.",
             "",
-            "주의사항: 약을 씹거나 부수지 말고 그대로 물로 넘겨주세요.",
+            "주의: 하루 최대 용량을 넘기지 마세요. 공복보다는 물과 함께 복용하는 것이 좋습니다.",
           ].join("\n"),
-          effect: "고혈압 치료제 (암로디핀/발사르탄 복합)",
+          effect: "해열·진통 (아세트아미노펜)",
           caution: [
             "복용 시 주의해야 할 점",
             "",
-            "임의 중단 금지",
-            "증상이 나아진 것 같아도 의사의 상담 없이 임의로 약 복용을 줄이거나 중단해서는 안 됩니다.",
+            "간 손상 주의",
+            "다른 감기약·진통제에 아세트아미노펜이 들어 있으면 중복 복용하지 마세요.",
             "",
-            "자몽주스 섭취 자제",
-            "자몽주스는 약의 혈중 농도를 높여 부작용 위험을 증가시킬 수 있으므로 복용 기간 중에는 피하는 것이 좋습니다.",
-            "",
-            "어지럼증 주의",
-            "혈압이 낮아지면서 어지러움을 느낄 수 있으므로, 앉거나 누웠다가 일어날 때는 천천히 움직이세요.",
+            "음주 주의",
+            "술을 마신 뒤에는 간 부담이 커질 수 있으니 복용을 피하세요.",
             "",
             "약 복용을 잊었을 때",
-            "생각난 즉시 복용하세요. 하지만 다음 복용 시간이 가까워졌다면 잊은 양은 건너뛰고 원래 시간에 다음 정량을 복용하세요. 절대로 한 번에 2배 용량을 복용하면 안 됩니다.",
+            "생각난 즉시 복용하되, 다음 복용 시간이 가깝다면 한 번에 두 배를 먹지 마세요.",
           ].join("\n"),
           notice:
-            "Notice: 정확한 복용법과 주의사항은 환자의 건강 상태에 따라 달라질 수 있으므로, 처방받으신 병원이나 약국의 안내를 가장 우선으로 따라주시기 바랍니다.",
+            "Notice: 정확한 복용법과 주의사항은 환자의 건강 상태에 따라 달라질 수 있으므로, 제품 설명서나 약사·의사 안내를 우선으로 따라주세요.",
           durWarning: null,
-          imageUrl:
-            "https://nedrug.mfds.go.kr/pbp/cmn/itemImageDownload/147426878513600052",
-          entpName: "",
-          detectedMark: "DC",
+          imageUrl: "",
+          entpName: "한국얀센",
+          detectedMark: "TYLENOL",
         };
         let pill = fallback;
         try {
           const detail = await fetchPillDetailBySeq(
-            "201402898",
-            "아발탄정10/160밀리그램",
+            "199303131",
+            "타이레놀정500밀리그램",
             schedule
           );
           if (detail?.itemSeq || detail?.name) {
@@ -1551,7 +1548,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
               effect: fallback.effect,
               notice: fallback.notice,
               time: fallback.time,
-              detectedMark: "DC",
+              detectedMark: "TYLENOL",
             };
           }
         } catch {
@@ -1559,7 +1556,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         }
         if (cancelledRef.current) return;
         stopCamera();
-        setDetectedMarks(["DC"]);
+        setDetectedMarks(["TYLENOL"]);
         setStatus("found");
         setDetailSource("scan");
         setActivePill(pill);
@@ -2122,9 +2119,12 @@ function FeedbackStatsScreen({ setScreen }) {
 function DetailScreen({ setScreen, pill, addToSchedule, detailSource }) {
   const [registered, setRegistered] = useState(false);
 
-  // TTS: 1·2번만 (이름/기본정보/복용방법) — 3·4·5(효능·주의·Notice)는 화면만
-  const buildDetailSpeech = (p) =>
-    [p.name, p.tag, p.time, p.timing].filter(Boolean).join(". ");
+  // TTS: 이름 + 언제 먹는지(time)만 — 긴 복용법·효능·주의는 화면만
+  const buildDetailSpeech = (p) => {
+    const when = p.time || "";
+    if (p.name && when) return `${p.name}. ${when} 드세요.`;
+    return [p.name, when].filter(Boolean).join(". ");
+  };
 
   useEffect(() => {
     if (!pill || detailSource !== "scan") return;
