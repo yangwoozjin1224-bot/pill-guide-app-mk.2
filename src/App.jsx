@@ -1459,7 +1459,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     setResumeKey((k) => k + 1);
   };
 
-  // DEMO VIDEO: ~6초 후 타이레놀 500미리 정(아세트아미노펜) 고정 결과 (촬영용)
+  // DEMO VIDEO: 10~16초 사이 랜덤 타이밍에 타이레놀 고정 결과 (촬영용)
   useEffect(() => {
     if (cameraError) return;
 
@@ -1474,19 +1474,24 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
     setQualityHint("흰 배경에 알약을 맞춰 주세요");
     setAccuracyWarning("");
 
+    // 결과 노출: 10초~16초 사이 균등 랜덤
+    const resultMs = 10000 + Math.floor(Math.random() * 6001);
+    const hintMs = Math.min(2500, Math.floor(resultMs * 0.22));
+    const loadingMs = Math.min(resultMs - 1200, Math.max(hintMs + 1500, Math.floor(resultMs * 0.62)));
+
     const timers = [];
     timers.push(
       setTimeout(() => {
         if (cancelledRef.current) return;
         setQualityHint("알약을 인식하고 있어요…");
-      }, 1800)
+      }, hintMs)
     );
     timers.push(
       setTimeout(() => {
         if (cancelledRef.current) return;
         setStatus("loading");
         setQualityHint("약 정보를 확인하고 있어요…");
-      }, 4000)
+      }, loadingMs)
     );
     timers.push(
       setTimeout(async () => {
@@ -1562,7 +1567,7 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         setDetailSource("scan");
         setActivePill(pill);
         setScreen("detail");
-      }, 6000)
+      }, resultMs)
     );
 
     return () => {
