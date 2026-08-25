@@ -1494,8 +1494,8 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
         processingRef.current = true;
         setStatus("loading");
         const fallback = {
-          id: "199303131",
-          itemSeq: "199303131",
+          id: "202106092",
+          itemSeq: "202106092",
           name: "타이레놀 500미리 정 아세트아미노펜",
           tag: "해열진통소염제",
           // TTS·카드용: 언제 먹는지 (짧게)
@@ -1525,24 +1525,25 @@ function ScanScreen({ setScreen, setActivePill, setDetailSource, schedule }) {
           notice:
             "Notice: 정확한 복용법과 주의사항은 환자의 건강 상태에 따라 달라질 수 있으므로, 제품 설명서나 약사·의사 안내를 우선으로 따라주세요.",
           durWarning: null,
-          imageUrl: "",
-          entpName: "한국얀센",
+          // 식약처 의약품안전나라 낱알 사진(시연용 로컬 복사본)
+          imageUrl: "/demo-tylenol.jpg",
+          entpName: "한국존슨앤드존슨판매(유)",
           detectedMark: "TYLENOL",
         };
         let pill = fallback;
         try {
           const detail = await fetchPillDetailBySeq(
-            "199303131",
-            "타이레놀정500밀리그램",
+            "202106092",
+            "타이레놀정500밀리그람",
             schedule
           );
           if (detail?.itemSeq || detail?.name) {
-            // Keep demo name/dosage/caution for filming; merge image from API when present
+            // Keep demo name/image/dosage for filming; API only fills missing fields
             pill = {
               ...fallback,
               ...detail,
               name: fallback.name,
-              imageUrl: detail.imageUrl || fallback.imageUrl,
+              imageUrl: fallback.imageUrl || detail.imageUrl || "",
               timing: fallback.timing,
               caution: fallback.caution,
               effect: fallback.effect,
